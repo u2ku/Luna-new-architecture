@@ -233,3 +233,102 @@ def test_builder_drops_orphan_assistant() -> None:
     assert len(turns) == 1
     assert turns[0].user.text == "u1"
     assert turns[0].assistant is None
+
+
+# ── end-to-end against the real-world ledger shape ─────────────────────────
+
+
+def test_builder_reads_real_world_shape(tmp_path: Path) -> None:
+    """End-to-end: builder reads a ledger shaped like the live world.jsonl.
+
+    The live luna-server writes events with these field names and shapes.
+    A regression here means the context builder stopped reading the
+    actual ledger.
+    """
+    p = tmp_path / "world.jsonl"
+    p.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event_id": f"e{i}",
+                        "seq": i,
+                        "timestamp": f"2026-07-22T00:00:{i:02d}Z",
+                        "type": "user_message" if i % 2 else "assistant_message",
+                        "actor": "user" if i % 2 else "luna",
+                        "payload": {
+                            "text": f"message-{i}",
+                            "session_id": "s1",
+                            "source": "web",
+                            "sender_name": "Zac" if i % 2 else None,
+                            "provider": None if i % 2 else "whooshd",
+                            "model": None if i % 2 else "gemma-4-26B-A4B-it-4bit",
+                        },
+                    }
+                )
+                for i in range(1, 11)
+            ]
+        )
+        + "\n"
+    )
+
+    # build_recent_messages goes through recent_message_events which
+    # defaults to LUNA_DATA_ROOT/ledger/world.jsonl. We need the path
+    # override because tmp_path is not under LUNA_DATA_ROOT.
+    from luna.context import recent_events
+    original = recent_events.ledger_path
+    recent_events.ledger_path = lambda: p
+    try:
+        events = builder.build_recent_messages(limit=25)
+    finally:
+        recent_events.ledger_path = original
+
+    assert len(events) == 10
+    assert [e.type for e in events] == [
+        "assistant_message" if i % 2 == 0 else "user_message" for i in range(1, 11)
+    ]
+    # user/assistant types come from the event type, not the actor field
+    assert all(e.is_user != e.is_assistant for e in events)
+
+    turns = builder.group_into_turns(events)
+    # Pairs (1,2) (3,4) (5,6) (7,8) (9,10) → 5 complete turns
+    assert len(turns) == 5
+    for t in turns:
+        assert t.user is not None
+        assert t.assistant is not None
+    # First turn: seq 1 (user) + seq 2 (assistant)
+    assert turns[0].user.seq == 1
+    assert turns[0].assistant.seq == 2
+    # Last turn: seq 9 (user) + seq 10 (assistant)
+    assert turns[-1].user.seq == 9
+    assert turns[-1].assistant.seq == 10
+
+
+def test_builder_with_live_ledger_if_available(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If LUNA_DATA_ROOT/world.jsonl is on disk, the builder must read it.
+
+    Skipped silently when the live ledger is not present (e.g. in CI).
+    """
+    live = Path("/Users/pieratradio/luna-new-architecture/LunaData/ledger/world.jsonl")
+    if not live.is_file():
+        return  # nothing to test against
+
+    from luna.context import recent_events
+
+    monkeypatch.setattr(recent_events, "ledger_path", lambda: live)
+
+    events = builder.build_recent_messages(limit=25)
+    # At least one user and one assistant message must be present in
+    # any non-trivial live ledger.
+    has_user = any(e.is_user for e in events)
+    has_assistant = any(e.is_assistant for e in events)
+    assert has_user, "live ledger has no user_message events"
+    assert has_assistant, "live ledger has no assistant_message events"
+
+    # Grouping should produce at least one complete turn in any
+    # ledger that's been used for a real conversation.
+    turns = builder.group_into_turns(events)
+    complete = sum(1 for t in turns if t.assistant is not None)
+    assert complete >= 1, "live ledger produced no complete turns"
