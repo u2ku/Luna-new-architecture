@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: luna-runtime
-Version: 0.1.0
-Summary: Event-sourced runtime for Luna
-Requires-Python: >=3.11
-Requires-Dist: fastapi<1,>=0.115
-Requires-Dist: PyYAML<7,>=6
-Requires-Dist: uvicorn[standard]<1,>=0.34
