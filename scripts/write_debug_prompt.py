@@ -76,13 +76,22 @@ def main() -> int:
             log.error("last line of %s is not valid JSON: %s", log_path, e)
             return 1
 
+        # The file is the EXACT prompt the model gets. Strip the
+        # wrapper — only the request body goes to last_request.txt.
+        # The full record (ts, url, status, response) lives in the
+        # JSONL log; the .txt is just the prompt.
+        request_body = record.get("request")
+        if not isinstance(request_body, dict):
+            log.error("log entry has no 'request' field: %s", log_path)
+            return 1
+
         OUTPUT_FILE.write_text(
-            json.dumps(record, indent=2, ensure_ascii=False) + "\n",
+            json.dumps(request_body, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        msg_count = len(record.get("request", {}).get("messages", []))
+        msg_count = len(request_body.get("messages", []))
         log.info(
-            "mirrored last entry of %s to %s (%d messages)",
+            "mirrored last request body of %s to %s (%d messages)",
             log_path,
             OUTPUT_FILE,
             msg_count,
