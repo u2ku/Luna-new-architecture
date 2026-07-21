@@ -1,96 +1,45 @@
-"""Write the model request body to output/debug/last_request.txt.
+"""Copy the last line of the model request log to output/debug/last_request.txt.
 
-Built to be safe to run on a cron every minute. Reads the live ledger,
-constructs the request body the runtime would send to whooshd for the
-most recent user turn, and writes it as pretty-printed JSON to the
-debug file. Any error is logged to output/debug/cron.log so the cron
-job can fail visibly without spamming the user.
+The request log is written by the model providers
+(:mod:`luna.models.openai._OpenAIChatClient`) whenever
+``$LUNA_DEBUG_PROMPT_LOG`` points at a JSONL path. Each line is one
+``{ts, url, status, request, response}`` record — the literal HTTP
+exchange, not a reconstruction.
 
-Usage:
-    python3 scripts/write_debug_prompt.py
+This script just reads the last line of that JSONL file and copies it
+to ``output/debug/last_request.txt``. That way ``last_request.txt`` is
+always an exact mirror of what the model actually got on the most
+recent call.
+
+Safe to run on a cron every minute. Errors are logged to
+``output/debug/cron.log``; the file is left untouched on failure.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import traceback
-from datetime import datetime, timezone
 from pathlib import Path
 
-# Project layout: this script lives at <root>/scripts/write_debug_prompt.py
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
-from luna.context.recent_events import ledger_path as default_ledger_path
-from luna.context.builder import build_recent_messages, group_into_turns
 
 OUTPUT_DIR = ROOT / "output" / "debug"
 OUTPUT_FILE = OUTPUT_DIR / "last_request.txt"
 LOG_FILE = OUTPUT_DIR / "cron.log"
 
-SYSTEM_PROMPT = (
-    "You are Luna.\n"
-    "This is the new runtime test.\n"
-    "Reply directly and clearly."
-)
 
-DEFAULT_MODEL = "gemma-4-26B-A4B-it-4bit"
-TEMPERATURE = 0.3
-MAX_TOKENS = 800
-MAX_RECENT_EVENTS = 24  # leave room in the window for the system prompt + current turn
-
-
-def _latest_user_text(events) -> str | None:
-    """Find the most recent user message in the recent-event slice.
-
-    If the trailing message is already a user message with no reply,
-    that's the current turn. Otherwise the last user message is what
-    the model would be responding to.
-    """
-    for event in reversed(events):
-        if event.is_user and event.text:
-            return event.text
-    return None
-
-
-def build_request_body() -> dict:
-    """Construct the JSON body the runtime would POST to whooshd.
-
-    Reads the live ledger, takes the last MAX_RECENT_EVENTS message
-    events, and assembles a messages list with the system prompt at
-    the head and the latest user turn at the tail.
-    """
-    events = build_recent_messages(limit=MAX_RECENT_EVENTS)
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for e in events:
-        role = "user" if e.is_user else "assistant" if e.is_assistant else None
-        if role is None:
-            continue
-        messages.append({"role": role, "content": e.text})
-
-    latest_user = _latest_user_text(events)
-    if latest_user is not None:
-        # Append the current turn as the last user message. If the
-        # trailing event is already a user message, this would be a
-        # duplicate — only append if it's different from the last
-        # user message in the list.
-        if not messages or messages[-1] != {"role": "user", "content": latest_user}:
-            messages.append({"role": "user", "content": latest_user})
-
-    return {
-        "model": DEFAULT_MODEL,
-        "messages": messages,
-        "temperature": TEMPERATURE,
-        "max_tokens": MAX_TOKENS,
-    }
+def _log_path() -> Path | None:
+    raw = __import__("os").environ.get("LUNA_DEBUG_PROMPT_LOG")
+    if not raw:
+        return None
+    return Path(raw)
 
 
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
     logging.basicConfig(
         filename=str(LOG_FILE),
         level=logging.INFO,
@@ -99,19 +48,45 @@ def main() -> int:
     log = logging.getLogger("write_debug_prompt")
 
     try:
-        body = build_request_body()
-        body["_meta"] = {
-            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "ledger": str(default_ledger_path()),
-            "recent_events_used": sum(
-                1 for m in body["messages"] if m["role"] != "system"
-            ),
-        }
+        log_path = _log_path()
+        if log_path is None:
+            log.error("LUNA_DEBUG_PROMPT_LOG not set; nothing to mirror")
+            return 1
+        if not log_path.is_file():
+            log.error("log path does not exist: %s", log_path)
+            return 1
+
+        # Read the last non-empty line. Newline-delimited JSON; the
+        # last line is the most recent model call.
+        last_line: str | None = None
+        with log_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if line.strip():
+                    last_line = line
+        if last_line is None:
+            log.error("log file is empty: %s", log_path)
+            return 1
+
+        # Validate the last line is real JSON; if not, surface the error
+        # to the cron log instead of writing garbage to the debug file.
+        try:
+            record = json.loads(last_line)
+        except json.JSONDecodeError as e:
+            log.error("last line of %s is not valid JSON: %s", log_path, e)
+            return 1
+
         OUTPUT_FILE.write_text(
-            json.dumps(body, indent=2, ensure_ascii=False) + "\n",
+            json.dumps(record, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        log.info("wrote %s (%d messages)", OUTPUT_FILE, len(body["messages"]))
+        msg_count = len(record.get("request", {}).get("messages", []))
+        log.info(
+            "mirrored last entry of %s to %s (%d messages)",
+            log_path,
+            OUTPUT_FILE,
+            msg_count,
+        )
     except Exception:
         log.error("failed: %s", traceback.format_exc())
         return 1

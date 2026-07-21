@@ -9,8 +9,14 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from luna.context.builder import build_recent_messages
 from luna.ledger import WorldLedger
 from luna.models.base import Message, ModelError, ModelProvider, ModelRequest
+
+# How many recent user/assistant turns the model gets as context.
+# Picked to fit comfortably under gemma's 32k context window with
+# room for the system prompt, the new turn, and the model's reply.
+CONTEXT_TURNS = 24
 
 
 class ChatRequest(BaseModel):
@@ -42,6 +48,19 @@ class ChatService:
     def complete(self, request: ChatRequest) -> ChatResponse:
         session_id = request.session_id or str(uuid4())
 
+        # Read recent context BEFORE writing the new user_event so the
+        # current turn isn't included twice (once from the recent
+        # slice, once from request.text).
+        recent = build_recent_messages(limit=CONTEXT_TURNS)
+        context_messages = tuple(
+            Message(
+                role="user" if e.is_user else "assistant",
+                content=e.text,
+            )
+            for e in recent
+            if e.text
+        )
+
         user_event = self.ledger.append(
             event_type="user_message",
             actor=request.sender_id or "user",
@@ -56,6 +75,7 @@ class ChatService:
         model_request = ModelRequest(
             messages=(
                 Message(role="system", content=self.system_prompt),
+                *context_messages,
                 Message(role="user", content=request.text),
             ),
             model=self.model_name,
@@ -65,6 +85,7 @@ class ChatService:
                 "session_id": session_id,
                 "source": request.source,
                 "user_event_id": user_event["event_id"],
+                "context_messages": len(context_messages),
             },
         )
 

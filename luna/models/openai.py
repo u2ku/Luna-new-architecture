@@ -16,6 +16,8 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
 from .base import (
@@ -48,6 +50,49 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
 }
 
 
+def _log_request(
+    log_path: Path | None,
+    url: str,
+    payload: Mapping[str, Any],
+    *,
+    status: int | None,
+    body: Any,
+) -> None:
+    """Append one JSONL record of a chat-completions call to ``log_path``.
+
+    Called by :meth:`_OpenAIChatClient.post` so the file is a faithful
+    capture of what went on the wire, not a reconstruction from the
+    ledger. Failures of the logger itself are swallowed — never let
+    debug plumbing take down a real model call.
+    """
+    if log_path is None:
+        return
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+            "url": url,
+            "status": status,
+            "request": payload,
+            "response": body,
+        }
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # debug plumbing must not affect the model call
+
+
+def _debug_log_path() -> Path | None:
+    """Read $LUNA_DEBUG_PROMPT_LOG and return a Path, or None.
+
+    Both providers call this from __post_init__; off by default.
+    """
+    raw = os.environ.get("LUNA_DEBUG_PROMPT_LOG")
+    if not raw:
+        return None
+    return Path(raw)
+
+
 @dataclass
 class _OpenAIChatClient:
     """Stateless HTTP client for an OpenAI-compatible chat completions API.
@@ -62,6 +107,10 @@ class _OpenAIChatClient:
     default_model: str | None
     timeout: float = DEFAULT_TIMEOUT
     extra_headers: Mapping[str, str] = field(default_factory=dict)
+    # When set, every request and response is appended to this JSONL
+    # path BEFORE the request goes on the wire. Off by default; the
+    # luna-server sets it via LUNA_DEBUG_PROMPT_LOG when debugging.
+    debug_log_path: Path | None = None
 
     def post(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         url = self.base_url.rstrip("/") + "/chat/completions"
@@ -70,19 +119,27 @@ class _OpenAIChatClient:
         if self.auth_header:
             headers["Authorization"] = self.auth_header
         req = urllib.request.Request(url, data=data, method="POST", headers=headers)
+        log_path = self.debug_log_path
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode("utf-8")
+                status = resp.status
         except urllib.error.HTTPError as e:
+            _log_request(log_path, url, payload, status=e.code, body=None)
             _raise_for_status(e)
         except urllib.error.URLError as e:
+            _log_request(log_path, url, payload, status=None, body=None)
             raise ModelUnavailable(f"chat client: connection error: {e.reason}") from e
         except TimeoutError as e:
+            _log_request(log_path, url, payload, status=None, body=None)
             raise ModelTimeout(f"chat client: timed out after {self.timeout}s") from e
         try:
-            return json.loads(raw)
+            body = json.loads(raw)
         except json.JSONDecodeError as e:
+            _log_request(log_path, url, payload, status=status, body={"_raw": raw})
             raise ModelProtocolError(f"chat client: non-JSON response: {e}") from e
+        _log_request(log_path, url, payload, status=status, body=body)
+        return body
 
     def encode(self, request: ModelRequest) -> dict[str, Any]:
         model = request.model or self.default_model
@@ -189,6 +246,7 @@ class OpenAIProvider(ModelProvider):
                 if self.organization
                 else {}
             ),
+            debug_log_path=_debug_log_path(),
         )
 
     def complete(self, request: ModelRequest) -> ModelResponse:

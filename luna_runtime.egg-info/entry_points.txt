@@ -1,0 +1,2 @@
+[console_scripts]
+luna-server = luna.api.server:main

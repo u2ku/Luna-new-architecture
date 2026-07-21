@@ -32,7 +32,7 @@ import os
 from dataclasses import dataclass
 
 from .base import ModelProvider, ModelRequest, ModelResponse
-from .openai import _OpenAIChatClient
+from .openai import _OpenAIChatClient, _debug_log_path
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
@@ -82,6 +82,7 @@ class WhooshdProvider(ModelProvider):
             auth_header=f"Bearer {self.api_key}",
             default_model=self.default_model,
             timeout=self.timeout,
+            debug_log_path=_debug_log_path(),
         )
 
     def complete(self, request: ModelRequest) -> ModelResponse:
