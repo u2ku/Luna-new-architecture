@@ -1,18 +1,21 @@
-"""Copy the last line of the model request log to output/debug/last_request.txt.
+"""Mirror the last model call to two debug files.
 
-The request log is written by the model providers
-(:mod:`luna.models.openai._OpenAIChatClient`) whenever
-``$LUNA_DEBUG_PROMPT_LOG`` points at a JSONL path. Each line is one
+The model providers (:mod:`luna.models.openai._OpenAIChatClient`) write
+every chat-completions call to a JSONL log whenever
+``$LUNA_DEBUG_PROMPT_LOG`` points at a file. Each line is one
 ``{ts, url, status, request, response}`` record — the literal HTTP
 exchange, not a reconstruction.
 
-This script just reads the last line of that JSONL file and copies it
-to ``output/debug/last_request.txt``. That way ``last_request.txt`` is
-always an exact mirror of what the model actually got on the most
-recent call.
+This script reads the last line and writes two debug files:
+
+  * ``last_request.txt`` — the JSON request body the API saw. This
+    is what goes over HTTP from the runtime to whooshd to mlx-vlm.
+  * ``last_prompt_rendered.txt`` — the text gemma actually decodes,
+    after mlx-vlm applies gemma's chat template. This is what the
+    model itself processes.
 
 Safe to run on a cron every minute. Errors are logged to
-``output/debug/cron.log``; the file is left untouched on failure.
+``output/debug/cron.log``; the files are left untouched on failure.
 """
 
 from __future__ import annotations
@@ -28,7 +31,27 @@ sys.path.insert(0, str(ROOT))
 
 OUTPUT_DIR = ROOT / "output" / "debug"
 OUTPUT_FILE = OUTPUT_DIR / "last_request.txt"
+RENDERED_FILE = OUTPUT_DIR / "last_prompt_rendered.txt"
 LOG_FILE = OUTPUT_DIR / "cron.log"
+
+
+# Standard gemma 2/3/4 chat template (matches HuggingFace's
+# google/gemma-*-IT chat_template.json). mlx-vlm applies this on
+# the server side; we render it locally so the file matches what
+# gemma actually sees, byte for byte.
+_GEMMA_TURN_OPEN = {"system": "system", "user": "user", "assistant": "model"}
+
+
+def _render_gemma(messages: list[dict]) -> str:
+    out = "<bos>"
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role not in _GEMMA_TURN_OPEN:
+            continue
+        out += f"<start_of_turn>{_GEMMA_TURN_OPEN[role]}\n{content}<end_of_turn>\n"
+    out += "<start_of_turn>model\n"  # generation prompt
+    return out
 
 
 def _log_path() -> Path | None:
@@ -56,8 +79,7 @@ def main() -> int:
             log.error("log path does not exist: %s", log_path)
             return 1
 
-        # Read the last non-empty line. Newline-delimited JSON; the
-        # last line is the most recent model call.
+        # Read the last non-empty line.
         last_line: str | None = None
         with log_path.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -68,33 +90,35 @@ def main() -> int:
             log.error("log file is empty: %s", log_path)
             return 1
 
-        # Validate the last line is real JSON; if not, surface the error
-        # to the cron log instead of writing garbage to the debug file.
         try:
             record = json.loads(last_line)
         except json.JSONDecodeError as e:
             log.error("last line of %s is not valid JSON: %s", log_path, e)
             return 1
 
-        # The file is the EXACT prompt the model gets. Strip the
-        # wrapper — only the request body goes to last_request.txt.
-        # The full record (ts, url, status, response) lives in the
-        # JSONL log; the .txt is just the prompt.
         request_body = record.get("request")
         if not isinstance(request_body, dict):
             log.error("log entry has no 'request' field: %s", log_path)
             return 1
 
+        # 1) the JSON request body — what the API saw
         OUTPUT_FILE.write_text(
             json.dumps(request_body, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
         msg_count = len(request_body.get("messages", []))
+
+        # 2) the chat-template-rendered text — what gemma actually saw
+        messages = request_body.get("messages", [])
+        rendered = _render_gemma(messages)
+        RENDERED_FILE.write_text(rendered, encoding="utf-8")
+
         log.info(
-            "mirrored last request body of %s to %s (%d messages)",
+            "mirrored last call of %s: %s (%d msgs, %d chars rendered)",
             log_path,
             OUTPUT_FILE,
             msg_count,
+            len(rendered),
         )
     except Exception:
         log.error("failed: %s", traceback.format_exc())
@@ -104,3 +128,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
