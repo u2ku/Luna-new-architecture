@@ -1,0 +1,3 @@
+runtime:
+  mode: shadow
+  data_root: /Users/pieratradio/LunaData

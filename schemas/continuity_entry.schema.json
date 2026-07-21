@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Luna Continuity Entry",
+  "type": "object",
+  "required": [
+    "entry_id",
+    "timestamp",
+    "previous_hash",
+    "state",
+    "hash"
+  ],
+  "properties": {
+    "entry_id": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "previous_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "state": {
+      "type": "object"
+    },
+    "hash": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

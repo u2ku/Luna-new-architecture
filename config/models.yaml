@@ -1,0 +1,4 @@
+models:
+  primary:
+    provider: whooshd
+    name: null

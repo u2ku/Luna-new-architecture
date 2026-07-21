@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Luna World Event",
+  "type": "object",
+  "required": [
+    "event_id",
+    "seq",
+    "timestamp",
+    "type",
+    "actor",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "type": {
+      "type": "string"
+    },
+    "actor": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

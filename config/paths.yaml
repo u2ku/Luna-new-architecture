@@ -1,0 +1,4 @@
+paths:
+  ledger: ledger
+  derived: derived
+  archive: archive/wiki
