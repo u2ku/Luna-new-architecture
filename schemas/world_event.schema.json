@@ -12,24 +12,106 @@
   ],
   "properties": {
     "event_id": {
-      "type": "string"
+      "type": "string",
+      "description": "Globally unique event id (UUID v4 recommended)"
     },
     "seq": {
       "type": "integer",
-      "minimum": 1
+      "minimum": 1,
+      "description": "Monotonic ledger sequence number"
     },
     "timestamp": {
       "type": "string",
-      "format": "date-time"
+      "format": "date-time",
+      "description": "ISO 8601 timestamp"
     },
     "type": {
-      "type": "string"
+      "type": "string",
+      "description": "Event type, e.g. user_message, assistant_message, tool_call, tool_result, system_event"
     },
     "actor": {
-      "type": "string"
+      "type": "object",
+      "description": "Who produced this event",
+      "required": ["id", "type"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable actor identity, e.g. 'identity:zac', 'agent:luna', 'system:whooshd'"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["human", "agent", "system"],
+          "description": "Kind of actor"
+        },
+        "display_name": {
+          "type": "string",
+          "description": "Human-readable name for logging and UI"
+        }
+      },
+      "additionalProperties": true
+    },
+    "source": {
+      "type": "object",
+      "description": "Where this event came from (channel/adapter that produced it)",
+      "required": ["platform"],
+      "properties": {
+        "platform": {
+          "type": "string",
+          "description": "Channel platform: 'web', 'slack', 'google_chat', 'discord', 'telegram', 'api', etc."
+        },
+        "adapter": {
+          "type": "string",
+          "description": "Adapter/bridge that ingested the event, e.g. 'n8n', 'fastapi', 'webhook'"
+        },
+        "account_id": {
+          "type": "string",
+          "description": "Workspace/tenant id on the platform"
+        },
+        "conversation_id": {
+          "type": "string",
+          "description": "Channel/room/DM id on the platform"
+        },
+        "thread_id": {
+          "type": "string",
+          "description": "Thread/topic id within the conversation (if applicable)"
+        },
+        "message_id": {
+          "type": "string",
+          "description": "Platform-native message id for inbound events"
+        },
+        "external_actor_id": {
+          "type": "string",
+          "description": "Platform-native user id of the originating human (if different from actor.id)"
+        }
+      },
+      "additionalProperties": true
+    },
+    "destination": {
+      "type": "object",
+      "description": "Where this event is going (the channel that should deliver it)",
+      "required": ["platform"],
+      "properties": {
+        "platform": {
+          "type": "string"
+        },
+        "adapter": {"type": "string"},
+        "account_id": {"type": "string"},
+        "conversation_id": {"type": "string"},
+        "thread_id": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "stream_id": {
+      "type": "string",
+      "description": "Conversation stream this event belongs to. Format: '<platform>:<account_id>:<conversation_id>:<thread_id>'. Required for any event that participates in a turn — used by recent_message_events to scope context per-channel and prevent cross-channel leakage."
+    },
+    "turn_id": {
+      "type": "string",
+      "description": "Identifier of the turn this event belongs to. User and assistant events in the same turn share a turn_id."
     },
     "payload": {
-      "type": "object"
+      "type": "object",
+      "description": "Event-type-specific data (e.g. {text, ...} for message events)"
     }
   },
   "additionalProperties": true

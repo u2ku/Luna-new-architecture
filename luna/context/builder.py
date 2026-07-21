@@ -1,13 +1,13 @@
 """Context builder for the model.
 
 Composes the inputs the model needs for a turn: the recent conversation
-plus whatever else the runtime decides to add (system prompt, retrieved
-documents, tool instructions, …).
+for the active stream plus whatever else the runtime decides to add
+(system prompt, retrieved documents, tool instructions, …).
 
 This module is the consumer of :mod:`luna.context.recent_events`. The
 caller of the builder supplies the surrounding structure; this module
-is responsible for pulling the recent-message slice from the ledger and
-shaping it for inclusion in the model context.
+is responsible for pulling the recent-message slice from one stream of
+the ledger and shaping it for inclusion in the model context.
 """
 
 from __future__ import annotations
@@ -32,17 +32,17 @@ class ConversationTurn:
 
 
 def build_recent_messages(
+    stream_id: str,
     limit: int = 25,
 ) -> list[MessageEvent]:
-    """Return the last ``limit`` message events from the ledger.
+    """Return the last ``limit`` message events for ``stream_id``.
 
-    Thin pass-through to :func:`luna.context.recent_events.recent_message_events`
-    kept here so the builder's surface is a single import. The full
-    context assembly (system prompt + retrieved docs + recent messages
-    + tool spec) is layered on top of this in higher-level functions
-    that don't exist yet.
+    ``stream_id`` is required. The builder never returns "recent
+    messages globally" — that would mix private and public-channel
+    context. See :mod:`luna.context.recent_events` for the security
+    boundary this enforces.
     """
-    return recent_message_events(limit=limit)
+    return recent_message_events(stream_id=stream_id, limit=limit)
 
 
 def group_into_turns(

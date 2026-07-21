@@ -28,8 +28,23 @@ def main() -> int:
     print()
 
     # --- 1. flat recent events ---
-    events = build_recent_messages(limit=25)
-    print(f"# 1. build_recent_messages(limit=25): {len(events)} events")
+    # stream_id is required: events are scoped per-channel/thread so a
+    # private web conversation can't bleed into a Slack context.
+    # For the live ledger we use the first stream_id we find.
+    import json as _json
+    from luna.context.recent_events import _iter_events, ledger_path as _ledger_path
+    stream_id: str | None = None
+    for event in _iter_events(_ledger_path()):
+        sid = event.get("stream_id")
+        if sid:
+            stream_id = sid
+            break
+    if stream_id is None:
+        print("  (no stream_id'd events in ledger yet)", file=sys.stderr)
+        return 1
+
+    events = build_recent_messages(stream_id=stream_id, limit=25)
+    print(f"# 1. build_recent_messages(stream_id={stream_id!r}, limit=25): {len(events)} events")
     print("#    (oldest → newest, the slice the model would see)")
     print()
     for e in events:
