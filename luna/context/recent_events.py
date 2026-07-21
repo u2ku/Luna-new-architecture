@@ -10,8 +10,12 @@ What counts as a "message event"
 
 An event is a message event when its ``type`` is one of:
 
-* ``message.in``  — an incoming user message
-* ``message.out`` — an outgoing assistant message
+* ``user_message``      — an incoming user message
+* ``assistant_message`` — an outgoing assistant message
+
+These are the names the live ``luna-server`` actually writes; the
+filter is parameterised so a future deployment can override the set
+without rewriting the reader.
 
 Tool calls, tool results, system events, receipts, and any other event
 type are filtered out. The ledger stays the single source of truth for
@@ -29,7 +33,7 @@ from typing import Iterable
 
 
 DEFAULT_LIMIT = 25
-MESSAGE_TYPES = frozenset({"message.in", "message.out"})
+MESSAGE_TYPES: frozenset[str] = frozenset({"user_message", "assistant_message"})
 
 
 @dataclass(frozen=True)
@@ -62,11 +66,11 @@ class MessageEvent:
 
     @property
     def is_user(self) -> bool:
-        return self.type == "message.in"
+        return self.type == "user_message"
 
     @property
     def is_assistant(self) -> bool:
-        return self.type == "message.out"
+        return self.type == "assistant_message"
 
 
 class LedgerNotFoundError(FileNotFoundError):
@@ -92,8 +96,8 @@ def ledger_path() -> Path:
     return Path("ledger") / "world.jsonl"
 
 
-def _is_message_event(event: dict) -> bool:
-    return event.get("type") in MESSAGE_TYPES
+def _is_message_event(event: dict, message_types: frozenset[str]) -> bool:
+    return event.get("type") in message_types
 
 
 def _coerce(event: dict) -> MessageEvent:
@@ -132,6 +136,7 @@ def recent_message_events(
     limit: int = DEFAULT_LIMIT,
     *,
     path: Path | None = None,
+    message_types: frozenset[str] = MESSAGE_TYPES,
 ) -> list[MessageEvent]:
     """Read the ledger and return the most recent ``limit`` message events.
 
@@ -142,6 +147,11 @@ def recent_message_events(
         returns an empty list.
     path:
         Override the ledger path. Defaults to :func:`ledger_path`.
+    message_types:
+        Set of event type names to treat as message events. Defaults
+        to ``MESSAGE_TYPES`` (``user_message`` and ``assistant_message``).
+        Override when a deployment uses different names; an empty
+        frozenset returns an empty list.
 
     Returns
     -------
@@ -155,7 +165,7 @@ def recent_message_events(
     LedgerNotFoundError
         If the resolved ledger path is not a regular file.
     """
-    if limit <= 0:
+    if limit <= 0 or not message_types:
         return []
     resolved = path if path is not None else ledger_path()
     if not resolved.is_file():
@@ -163,7 +173,8 @@ def recent_message_events(
 
     window: deque[MessageEvent] = deque(maxlen=limit)
     for event in _iter_events(resolved):
-        if not _is_message_event(event):
+        if not _is_message_event(event, message_types):
             continue
         window.append(_coerce(event))
     return list(window)
+

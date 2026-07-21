@@ -33,7 +33,7 @@ def _msg(seq: int, type_: str, text: str, *, turn_id: str | None = None) -> dict
         "seq": seq,
         "timestamp": "2026-07-22T00:00:00Z",
         "type": type_,
-        "actor": "user" if type_ == "message.in" else "luna",
+        "actor": "user" if type_ == "user_message" else "luna",
         "payload": payload,
     }
 
@@ -50,15 +50,15 @@ def test_missing_ledger_raises(tmp_path: Path) -> None:
 
 def test_limit_zero_returns_empty(tmp_path: Path) -> None:
     p = tmp_path / "world.jsonl"
-    _write_ledger(p, [_msg(1, "message.in", "hi")])
+    _write_ledger(p, [_msg(1, "user_message", "hi")])
     assert recent_message_events(limit=0, path=p) == []
 
 
 def test_fewer_than_limit_returns_all(tmp_path: Path) -> None:
     p = tmp_path / "world.jsonl"
     events = [
-        _msg(1, "message.in", "first"),
-        _msg(2, "message.out", "first-reply"),
+        _msg(1, "user_message", "first"),
+        _msg(2, "assistant_message", "first-reply"),
     ]
     _write_ledger(p, events)
     out = recent_message_events(limit=25, path=p)
@@ -68,7 +68,7 @@ def test_fewer_than_limit_returns_all(tmp_path: Path) -> None:
 
 def test_more_than_limit_keeps_tail_in_order(tmp_path: Path) -> None:
     p = tmp_path / "world.jsonl"
-    events = [_msg(i, "message.in", f"msg-{i}") for i in range(1, 31)]
+    events = [_msg(i, "user_message", f"msg-{i}") for i in range(1, 31)]
     _write_ledger(p, events)
     out = recent_message_events(limit=25, path=p)
     assert len(out) == 25
@@ -80,18 +80,18 @@ def test_more_than_limit_keeps_tail_in_order(tmp_path: Path) -> None:
 def test_only_message_events_are_returned(tmp_path: Path) -> None:
     p = tmp_path / "world.jsonl"
     events = [
-        _msg(1, "message.in", "hi"),
+        _msg(1, "user_message", "hi"),
         {"event_id": "x", "seq": 2, "timestamp": "t", "type": "tool.call",
          "actor": "luna", "payload": {"name": "search"}},
         {"event_id": "y", "seq": 3, "timestamp": "t", "type": "tool.result",
          "actor": "luna", "payload": {"output": "..."}},
         {"event_id": "z", "seq": 4, "timestamp": "t", "type": "system",
          "actor": "runtime", "payload": {"note": "boot"}},
-        _msg(5, "message.out", "hello back"),
+        _msg(5, "assistant_message", "hello back"),
     ]
     _write_ledger(p, events)
     out = recent_message_events(limit=25, path=p)
-    assert [e.type for e in out] == ["message.in", "message.out"]
+    assert [e.type for e in out] == ["user_message", "assistant_message"]
     assert [e.text for e in out] == ["hi", "hello back"]
 
 
@@ -100,10 +100,10 @@ def test_malformed_lines_are_skipped(tmp_path: Path) -> None:
     p.write_text(
         "\n".join(
             [
-                json.dumps(_msg(1, "message.in", "first")),
+                json.dumps(_msg(1, "user_message", "first")),
                 "{not valid json",
                 "",
-                json.dumps(_msg(2, "message.out", "second")),
+                json.dumps(_msg(2, "assistant_message", "second")),
             ]
         )
         + "\n"
@@ -117,9 +117,9 @@ def test_turn_id_is_extracted_from_payload(tmp_path: Path) -> None:
     _write_ledger(
         p,
         [
-            _msg(1, "message.in", "hi", turn_id="turn-1"),
-            _msg(2, "message.out", "hello", turn_id="turn-1"),
-            _msg(3, "message.in", "next", turn_id="turn-2"),
+            _msg(1, "user_message", "hi", turn_id="turn-1"),
+            _msg(2, "assistant_message", "hello", turn_id="turn-1"),
+            _msg(3, "user_message", "next", turn_id="turn-2"),
         ],
     )
     out = recent_message_events(limit=25, path=p)
@@ -131,13 +131,42 @@ def test_user_and_assistant_helpers(tmp_path: Path) -> None:
     _write_ledger(
         p,
         [
-            _msg(1, "message.in", "u"),
-            _msg(2, "message.out", "a"),
+            _msg(1, "user_message", "u"),
+            _msg(2, "assistant_message", "a"),
         ],
     )
     [u, a] = recent_message_events(limit=25, path=p)
     assert u.is_user and not u.is_assistant
     assert a.is_assistant and not a.is_user
+
+
+def test_message_types_override_filters_differently(tmp_path: Path) -> None:
+    """A deployment that uses different event names can override the filter."""
+    p = tmp_path / "world.jsonl"
+    _write_ledger(
+        p,
+        [
+            _msg(1, "user_message", "u"),
+            _msg(2, "inbound_msg", "i"),  # alt name
+            _msg(3, "outbound_msg", "o"),  # alt name
+        ],
+    )
+    # Default filter ignores the alt names.
+    default = recent_message_events(limit=25, path=p)
+    assert [e.type for e in default] == ["user_message"]
+    # Override accepts the alt names.
+    custom = recent_message_events(
+        limit=25, path=p, message_types=frozenset({"inbound_msg", "outbound_msg"})
+    )
+    assert [e.type for e in custom] == ["inbound_msg", "outbound_msg"]
+
+
+def test_empty_message_types_returns_empty(tmp_path: Path) -> None:
+    p = tmp_path / "world.jsonl"
+    _write_ledger(p, [_msg(1, "user_message", "hi")])
+    assert recent_message_events(
+        limit=25, path=p, message_types=frozenset()
+    ) == []
 
 
 def test_ledger_path_uses_luna_data_root(tmp_path: Path, monkeypatch) -> None:
@@ -162,7 +191,7 @@ def test_builder_returns_recent_events(tmp_path: Path, monkeypatch) -> None:
     p = tmp_path / "world.jsonl"
     _write_ledger(
         p,
-        [_msg(i, "message.in" if i % 2 else "message.out", f"m{i}") for i in range(1, 6)],
+        [_msg(i, "user_message" if i % 2 else "assistant_message", f"m{i}") for i in range(1, 6)],
     )
     monkeypatch.setattr("luna.context.recent_events.ledger_path", lambda: p)
     out = builder.build_recent_messages(limit=3)
@@ -172,10 +201,10 @@ def test_builder_returns_recent_events(tmp_path: Path, monkeypatch) -> None:
 
 def test_builder_groups_into_turns() -> None:
     events = [
-        _coerce(_msg(1, "message.in", "u1")),
-        _coerce(_msg(2, "message.out", "a1")),
-        _coerce(_msg(3, "message.in", "u2")),
-        _coerce(_msg(4, "message.out", "a2")),
+        _coerce(_msg(1, "user_message", "u1")),
+        _coerce(_msg(2, "assistant_message", "a1")),
+        _coerce(_msg(3, "user_message", "u2")),
+        _coerce(_msg(4, "assistant_message", "a2")),
     ]
     turns = builder.group_into_turns(events)
     assert len(turns) == 2
@@ -185,9 +214,9 @@ def test_builder_groups_into_turns() -> None:
 
 def test_builder_trailing_user_with_no_reply() -> None:
     events = [
-        _coerce(_msg(1, "message.in", "u1")),
-        _coerce(_msg(2, "message.out", "a1")),
-        _coerce(_msg(3, "message.in", "u2")),  # no reply yet
+        _coerce(_msg(1, "user_message", "u1")),
+        _coerce(_msg(2, "assistant_message", "a1")),
+        _coerce(_msg(3, "user_message", "u2")),  # no reply yet
     ]
     turns = builder.group_into_turns(events)
     assert len(turns) == 2
@@ -197,8 +226,8 @@ def test_builder_trailing_user_with_no_reply() -> None:
 
 def test_builder_drops_orphan_assistant() -> None:
     events = [
-        _coerce(_msg(1, "message.out", "orphan")),  # no preceding user
-        _coerce(_msg(2, "message.in", "u1")),
+        _coerce(_msg(1, "assistant_message", "orphan")),  # no preceding user
+        _coerce(_msg(2, "user_message", "u1")),
     ]
     turns = builder.group_into_turns(events)
     assert len(turns) == 1
