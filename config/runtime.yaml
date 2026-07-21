@@ -1,3 +1,7 @@
 runtime:
-  mode: shadow
-  data_root: /Users/pieratradio/LunaData
+  mode: test
+  data_root: /Users/pieratradio/luna-new-architecture/LunaData
+  system_prompt: >-
+    You are Luna.
+    This is the new runtime test.
+    Reply directly and clearly.

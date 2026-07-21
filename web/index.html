@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Luna — New Runtime Test</title>
+
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #07080b;
+        --ink: #f4efe6;
+        --muted: rgba(244, 239, 230, 0.48);
+        --line: rgba(244, 239, 230, 0.14);
+        --user: rgba(244, 239, 230, 0.08);
+        --luna: rgba(10, 11, 15, 0.58);
+        --accent: #a970ff;
+        --accent-bright: #c8a4ff;
+        --accent-deep: #6f3cc3;
+        --danger: #ffb4a8;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      body {
+        overflow: hidden;
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background:
+          radial-gradient(circle at 50% 7%, rgba(169, 112, 255, 0.22), transparent 27rem),
+          radial-gradient(circle at 85% 78%, rgba(111, 60, 195, 0.14), transparent 23rem),
+          linear-gradient(180deg, #090a0e 0%, #07080b 58%, #050608 100%);
+      }
+
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.28;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.026) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+        background-size: 44px 44px;
+        mask-image: linear-gradient(to bottom, black, transparent 72%);
+      }
+
+      .app {
+        position: relative;
+        z-index: 1;
+        width: 100%;
+        max-width: 480px;
+        height: 100dvh;
+        min-height: 100dvh;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        padding: max(16px, env(safe-area-inset-top)) 16px max(12px, env(safe-area-inset-bottom));
+      }
+
+      .logo-wrap {
+        flex: 0 0 auto;
+        display: grid;
+        place-items: center;
+        padding: 16px 0 14px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .logo {
+        position: relative;
+        width: 118px;
+        height: 66px;
+        display: grid;
+        place-items: center;
+        letter-spacing: 0.48em;
+        padding-left: 0.48em;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 1.35rem;
+        font-weight: 400;
+        color: var(--ink);
+        text-transform: uppercase;
+      }
+
+      .logo::before {
+        content: "";
+        position: absolute;
+        width: 58px;
+        height: 58px;
+        border: 1px solid rgba(244, 239, 230, 0.22);
+        border-radius: 999px;
+        box-shadow:
+          inset -9px 0 8px -8px rgba(244, 239, 230, 0.82),
+          10px 0 28px rgba(169, 112, 255, 0.28);
+      }
+
+      .logo::after {
+        content: "";
+        position: absolute;
+        top: -4px;
+        bottom: -4px;
+        left: 50%;
+        width: 1px;
+        background: linear-gradient(transparent, rgba(244, 239, 230, 0.52), transparent);
+        transform: translateX(-50%);
+      }
+
+
+      .test-badge {
+        margin-top: 2px;
+        color: var(--accent-bright);
+        font-size: 0.62rem;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
+        opacity: 0.9;
+      }
+
+      .messages {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding: 24px 0 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        scrollbar-width: none;
+      }
+
+      .messages::-webkit-scrollbar {
+        display: none;
+      }
+
+      .empty {
+        margin: auto 0;
+        text-align: center;
+        color: rgba(244, 239, 230, 0.3);
+        font-size: 0.82rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+
+      .row {
+        display: flex;
+        width: 100%;
+      }
+
+      .row.user {
+        justify-content: flex-end;
+      }
+
+      .row.luna {
+        justify-content: flex-start;
+        padding-top: 22px;
+      }
+
+      .bubble {
+        max-width: 82%;
+        padding: 1rem 1.08rem;
+        border-radius: 20px;
+        color: var(--ink);
+        font-size: 1rem;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        backdrop-filter: blur(16px);
+      }
+
+      .row.user .bubble {
+        background: var(--user);
+        border: 1px solid rgba(244, 239, 230, 0.1);
+        border-bottom-right-radius: 8px;
+      }
+
+      .row.luna .bubble {
+        position: relative;
+        background: var(--luna);
+        border: 1px solid rgba(169, 112, 255, 0.34);
+        border-bottom-left-radius: 8px;
+      }
+
+      .row.luna .bubble::before {
+        content: "LUNA";
+        position: absolute;
+        top: -1.55rem;
+        left: 0.1rem;
+        color: rgba(200, 164, 255, 0.92);
+        font-size: 0.68rem;
+        letter-spacing: 0.28em;
+      }
+
+      .row.system .bubble {
+        max-width: 100%;
+        margin: 0 auto;
+        color: var(--danger);
+        background: rgba(255, 180, 168, 0.08);
+        border: 1px solid rgba(255, 180, 168, 0.22);
+        font-size: 0.9rem;
+      }
+
+      .typing {
+        display: inline-flex;
+        gap: 5px;
+        align-items: center;
+      }
+
+      .typing span {
+        width: 5px;
+        height: 5px;
+        border-radius: 999px;
+        background: rgba(244, 239, 230, 0.48);
+        animation: pulse 1s infinite ease-in-out;
+      }
+
+      .typing span:nth-child(2) {
+        animation-delay: 0.14s;
+      }
+
+      .typing span:nth-child(3) {
+        animation-delay: 0.28s;
+      }
+
+      @keyframes pulse {
+        0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+        40% { opacity: 1; transform: translateY(-3px); }
+      }
+
+      .composer-wrap {
+        flex: 0 0 auto;
+        padding-top: 10px;
+      }
+
+      .composer {
+        position: relative;
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+        width: 100%;
+        min-height: 62px;
+        padding: 8px;
+        border: 1px solid rgba(169, 112, 255, 0.38);
+        border-radius: 999px;
+        background: rgba(13, 14, 18, 0.88);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.04),
+          0 18px 50px rgba(0, 0, 0, 0.24),
+          0 0 36px rgba(111, 60, 195, 0.12);
+      }
+
+      textarea {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 44px;
+        max-height: 132px;
+        resize: none;
+        border: 0;
+        outline: 0;
+        padding: 11px 8px 9px 12px;
+        background: transparent;
+        color: var(--ink);
+        font: inherit;
+        font-size: 1rem;
+        line-height: 1.35;
+      }
+
+      textarea::placeholder {
+        color: rgba(244, 239, 230, 0.38);
+      }
+
+      button {
+        flex: 0 0 auto;
+        width: 44px;
+        height: 44px;
+        border: 1px solid rgba(244, 239, 230, 0.16);
+        border-radius: 999px;
+        background: rgba(111, 60, 195, 0.34);
+        color: var(--accent-bright);
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .status {
+        min-height: 18px;
+        padding: 7px 8px 0;
+        color: var(--muted);
+        font-size: 0.72rem;
+        letter-spacing: 0.08em;
+      }
+
+      @media (min-width: 481px) {
+        body {
+          display: grid;
+          place-items: center;
+        }
+
+        .app {
+          height: min(900px, 100dvh);
+          min-height: min(900px, 100dvh);
+          border-left: 1px solid rgba(244, 239, 230, 0.08);
+          border-right: 1px solid rgba(244, 239, 230, 0.08);
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <main class="app" aria-label="Luna chat interface">
+      <header class="logo-wrap" aria-label="Luna">
+        <div class="logo">Luna</div>
+        <div class="test-badge">New substrate test</div>
+      </header>
+
+      <section id="messages" class="messages" aria-live="polite">
+        <div id="empty" class="empty">New runtime ready</div>
+      </section>
+
+      <footer class="composer-wrap">
+        <form id="composer" class="composer" autocomplete="off">
+          <textarea
+            id="input"
+            name="chatInput"
+            rows="1"
+            placeholder="Message Luna..."
+            aria-label="Message Luna"
+          ></textarea>
+          <button id="send" type="submit" aria-label="Send message">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 19V5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <path d="M6.5 10.5L12 5L17.5 10.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+        </form>
+        <div id="status" class="status"></div>
+      </footer>
+    </main>
+
+    <script>
+      const API_URL = '/api/chat';
+      const STORAGE_KEY = 'luna-new-runtime-test-session-v1';
+
+      const messagesEl = document.getElementById('messages');
+      const emptyEl = document.getElementById('empty');
+      const form = document.getElementById('composer');
+      const input = document.getElementById('input');
+      const send = document.getElementById('send');
+      const statusEl = document.getElementById('status');
+
+      const sessionId = getSessionId();
+
+      input.focus({ preventScroll: true });
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+
+        addMessage('user', text);
+        input.value = '';
+        resizeInput();
+        setBusy(true);
+
+        const typingEl = addTyping();
+
+        try {
+          const reply = await sendToLuna(text);
+          typingEl.remove();
+          addMessage('luna', reply || 'No response returned from Luna.');
+          statusEl.textContent = '';
+        } catch (error) {
+          typingEl.remove();
+          addMessage('system', getHelpfulError(error));
+          statusEl.textContent = 'Check the Luna runtime and Whooshd processes.';
+        } finally {
+          setBusy(false);
+          input.focus({ preventScroll: true });
+        }
+      });
+
+      input.addEventListener('input', resizeInput);
+
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          form.requestSubmit();
+        }
+      });
+
+      function getSessionId() {
+        let id = localStorage.getItem(STORAGE_KEY);
+        if (!id) {
+          id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          localStorage.setItem(STORAGE_KEY, id);
+        }
+        return id;
+      }
+
+      async function sendToLuna(text) {
+        const response = await fetch(API_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            text,
+            session_id: sessionId,
+            source: 'web',
+            sender_name: 'Zac'
+          })
+        });
+
+        const raw = await response.text();
+
+        if (!response.ok) {
+          throw new Error(`Luna runtime returned ${response.status}: ${raw || response.statusText}`);
+        }
+
+        return extractReply(raw);
+      }
+
+      function extractReply(raw) {
+        if (!raw) return '';
+
+        let data;
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          return raw;
+        }
+
+        if (typeof data === 'string') return data;
+
+        if (Array.isArray(data)) {
+          return data
+            .map(extractFromObject)
+            .filter(Boolean)
+            .join('\n\n');
+        }
+
+        return extractFromObject(data) || JSON.stringify(data, null, 2);
+      }
+
+      function extractFromObject(value) {
+        if (!value || typeof value !== 'object') return '';
+
+        const direct =
+          value.output ||
+          value.text ||
+          value.response ||
+          value.message ||
+          value.answer ||
+          value.result ||
+          value.data?.output ||
+          value.data?.text ||
+          value.data?.message ||
+          value.json?.output ||
+          value.json?.text ||
+          value.json?.message;
+
+        if (typeof direct === 'string') return direct;
+        if (direct && typeof direct === 'object') return extractFromObject(direct);
+
+        return '';
+      }
+
+      function addMessage(type, text) {
+        emptyEl?.remove();
+        const row = document.createElement('div');
+        row.className = `row ${type}`;
+
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = text;
+
+        row.appendChild(bubble);
+        messagesEl.appendChild(row);
+        scrollToBottom();
+        return row;
+      }
+
+      function addTyping() {
+        emptyEl?.remove();
+        const row = document.createElement('div');
+        row.className = 'row luna';
+
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
+
+        row.appendChild(bubble);
+        messagesEl.appendChild(row);
+        scrollToBottom();
+        return row;
+      }
+
+      function setBusy(isBusy) {
+        send.disabled = isBusy;
+        input.disabled = isBusy;
+      }
+
+      function resizeInput() {
+        input.style.height = '44px';
+        input.style.height = `${Math.min(input.scrollHeight, 132)}px`;
+      }
+
+      function scrollToBottom() {
+        requestAnimationFrame(() => {
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        });
+      }
+
+      function getHelpfulError(error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.toLowerCase().includes('failed to fetch')) return message;
+
+        return `Could not reach the Luna runtime. Check that the server is running on this host and that this page was opened through the Luna server.`;
+      }
+    </script>
+  </body>
+</html>
