@@ -32,6 +32,12 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
     thread_id: str | None = None
     external_actor_id: str | None = None
+    # When the caller has already written a user_message event to
+    # the ledger (e.g. the email inbox), pass it back here so the
+    # chat service uses the same event_id / stream_id / turn_id
+    # and SKIPS writing a duplicate user_event. The assistant_message
+    # is still written and the model is still called.
+    existing_user_event: dict | None = None
 
 
 class ChatResponse(BaseModel):
@@ -103,19 +109,79 @@ class ChatService:
         turn_id = str(uuid4())
         platform = request.source
 
-        # Web platform: session_id is the conversation and thread.
-        # Other platforms: account/conversation/thread come from the
-        # adapter via the ChatRequest fields.
-        conversation_id = request.conversation_id or session_id
-        thread_id = request.thread_id or session_id
-        account_id = request.account_id  # may be None for web
+        # Two paths: caller wrote the user_event already (email
+        # inbox, Slack adapter, etc.) and we should NOT write a
+        # duplicate; or the caller is the web UI and we write
+        # everything from scratch.
+        if request.existing_user_event is not None:
+            user_event = request.existing_user_event
+            stream_id = str(user_event["stream_id"])
+            turn_id = str(user_event["turn_id"])
+            account_id = user_event.get("source", {}).get("account_id")
+            conversation_id = user_event.get("source", {}).get(
+                "conversation_id", session_id
+            )
+            thread_id = user_event.get("source", {}).get("thread_id", session_id)
+        else:
+            # Web platform: session_id is the conversation and thread.
+            # Other platforms: account/conversation/thread come from
+            # the adapter via the ChatRequest fields.
+            conversation_id = request.conversation_id or session_id
+            thread_id = request.thread_id or session_id
+            account_id = request.account_id
 
-        stream_id = self._build_stream_id(
-            platform, account_id, conversation_id, thread_id
-        )
+            stream_id = self._build_stream_id(
+                platform, account_id, conversation_id, thread_id
+            )
 
-        # Read recent context for THIS stream BEFORE writing the new
-        # user_event. Different streams must never share context.
+            # Read recent context for THIS stream BEFORE writing the
+            # new user_event. Different streams must never share context.
+            recent = build_recent_messages(
+                stream_id=stream_id, limit=CONTEXT_TURNS
+            )
+            context_messages = tuple(
+                Message(
+                    role="user" if e.is_user else "assistant",
+                    content=e.text,
+                )
+                for e in recent
+                if e.text
+            )
+
+            user_actor = {
+                "id": request.sender_id or self.default_user_id,
+                "type": "human",
+            }
+            if request.sender_name:
+                user_actor["display_name"] = request.sender_name
+            elif self.default_user_display:
+                user_actor["display_name"] = self.default_user_display
+
+            user_source: dict = {"platform": platform, "adapter": "fastapi"}
+            if account_id:
+                user_source["account_id"] = account_id
+            user_source["conversation_id"] = conversation_id
+            if thread_id:
+                user_source["thread_id"] = thread_id
+            if request.external_actor_id:
+                user_source["external_actor_id"] = request.external_actor_id
+
+            user_event = self.ledger.append(
+                event_type="user_message",
+                actor=user_actor,
+                source=user_source,
+                destination={"platform": "luna-runtime"},
+                stream_id=stream_id,
+                turn_id=turn_id,
+                payload={
+                    "text": request.text,
+                    "sender_name": request.sender_name,
+                },
+            )
+
+        # In both paths, fetch the recent context for the model call.
+        # When existing_user_event was provided, we just wrote it, so
+        # the recent slice includes it.
         recent = build_recent_messages(stream_id=stream_id, limit=CONTEXT_TURNS)
         context_messages = tuple(
             Message(
@@ -124,37 +190,6 @@ class ChatService:
             )
             for e in recent
             if e.text
-        )
-
-        user_actor = {
-            "id": request.sender_id or self.default_user_id,
-            "type": "human",
-        }
-        if request.sender_name:
-            user_actor["display_name"] = request.sender_name
-        elif self.default_user_display:
-            user_actor["display_name"] = self.default_user_display
-
-        user_source: dict = {"platform": platform, "adapter": "fastapi"}
-        if account_id:
-            user_source["account_id"] = account_id
-        user_source["conversation_id"] = conversation_id
-        if thread_id:
-            user_source["thread_id"] = thread_id
-        if request.external_actor_id:
-            user_source["external_actor_id"] = request.external_actor_id
-
-        user_event = self.ledger.append(
-            event_type="user_message",
-            actor=user_actor,
-            source=user_source,
-            destination={"platform": "luna-runtime"},
-            stream_id=stream_id,
-            turn_id=turn_id,
-            payload={
-                "text": request.text,
-                "sender_name": request.sender_name,
-            },
         )
 
         model_request = ModelRequest(
@@ -201,7 +236,8 @@ class ChatService:
         assistant_destination: dict = {"platform": platform, "adapter": "fastapi"}
         if account_id:
             assistant_destination["account_id"] = account_id
-        assistant_destination["conversation_id"] = conversation_id
+        if conversation_id:
+            assistant_destination["conversation_id"] = conversation_id
         if thread_id:
             assistant_destination["thread_id"] = thread_id
 
