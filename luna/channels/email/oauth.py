@@ -74,9 +74,13 @@ class OAuthConfig:
         expire unless the user revokes it or the refresh-token
         quota is exceeded.
     scopes:
-        Space-separated OAuth scopes. ``https://mail.google.com/``
-        for full Gmail, ``https://www.googleapis.com/auth/gmail.send``
-        for send-only.
+        Space-separated OAuth scopes. The default is the union
+        the email channel needs end-to-end:
+          * ``gmail.readonly`` — list + read messages (inbox sync)
+          * ``gmail.compose``  — create / update drafts, send mail
+                                (the outbox flush)
+        For send-only deployments, set
+        ``LUNA_EMAIL_OAUTH_SCOPES="https://www.googleapis.com/auth/gmail.send"``.
     token_uri:
         Google's token endpoint. Defaults to the production URL;
         override only for testing.
@@ -85,7 +89,10 @@ class OAuthConfig:
     client_id: str
     client_secret: str
     refresh_token: str
-    scopes: str = "https://www.googleapis.com/auth/gmail.send"
+    scopes: str = (
+        "https://www.googleapis.com/auth/gmail.readonly "
+        "https://www.googleapis.com/auth/gmail.compose"
+    )
     token_uri: str = GOOGLE_TOKEN_URL
 
     @classmethod
