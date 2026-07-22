@@ -4,7 +4,7 @@ Builds the reply (with proper ``In-Reply-To`` / ``References``
 headers to keep the conversation threaded), records it in the
 SQLite store, and either delivers via SMTP or queues it for
 later. Actual SMTP delivery is a thin wrapper around
-``smtplib.SMTP`` — see ``send_via_smtp``.
+``smtplib.SMTP`` — see :func:`send_via_smtp`.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 from ...ledger import WorldLedger
+from .config import SmtpConfig
 from .store import EmailStore
 
 
@@ -52,17 +53,23 @@ def build_reply(
     return msg
 
 
-def send_via_smtp(msg: EmailMessage, host: str, port: int = 25) -> None:
-    """Deliver ``msg`` via SMTP. No-op if delivery fails — the store
-    keeps the queued message and the next cron cycle can retry.
+def send_via_smtp(msg: EmailMessage, config: SmtpConfig) -> None:
+    """Deliver ``msg`` via SMTP. Returns ``None`` on success and on
+    any non-fatal delivery error — the caller is expected to inspect
+    the store; a more sophisticated implementation would surface
+    the error and let the cron decide whether to retry.
     """
     try:
-        with smtplib.SMTP(host=host, port=port, timeout=15) as smtp:
+        with smtplib.SMTP(host=config.host, port=config.port, timeout=15) as smtp:
+            smtp.ehlo()
+            if config.security == "starttls":
+                smtp.starttls()
+                smtp.ehlo()
+            if config.username and config.password:
+                smtp.login(config.username, config.password)
             smtp.send_message(msg)
     except (smtplib.SMTPException, socket.error, OSError):
         # Caller is expected to inspect the store; do not raise.
-        # A more sophisticated implementation would surface the
-        # error and let the cron decide whether to retry.
         return
 
 
@@ -80,15 +87,17 @@ class EmailSender:
         ledger: WorldLedger,
         store: EmailStore,
         *,
-        from_addr: str,
-        smtp_host: str | None = None,
-        smtp_port: int = 25,
+        smtp: SmtpConfig | None = None,
+        from_addr: str | None = None,
     ) -> None:
         self.ledger = ledger
         self.store = store
-        self.from_addr = from_addr
-        self.smtp_host = smtp_host
-        self.smtp_port = smtp_port
+        self.smtp = smtp
+        self.from_addr = from_addr or ""
+        if not self.from_addr:
+            raise ValueError(
+                "EmailSender needs a from_addr (or set LUNA_EMAIL_FROM_ADDRESS)"
+            )
 
     def send(
         self,
@@ -120,8 +129,8 @@ class EmailSender:
         )
 
         outbound_status = "queued"
-        if self.smtp_host:
-            send_via_smtp(msg, host=self.smtp_host, port=self.smtp_port)
+        if self.smtp and self.smtp.is_configured():
+            send_via_smtp(msg, self.smtp)
             outbound_status = "sent"
 
         # Find the original inbound message so we can record the
