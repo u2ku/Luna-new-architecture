@@ -227,6 +227,9 @@ class OpenAIProvider(ModelProvider):
     """
 
     name: str = "openai"
+    #: OpenAI's chat completions API supports native function-calling, so
+    #: the turn loop sends ``tools`` on the wire and reads ``tool_calls``.
+    supports_native_tools: bool = True
     api_key: str | None = None
     base_url: str = DEFAULT_BASE_URL
     default_model: str | None = DEFAULT_MODEL

@@ -1,2 +1,20 @@
 tools:
   default_policy: deny
+  enabled:
+    - search_archive
+    - read_artifact
+    - create_artifact
+  per_turn:
+    # Bounded per-turn tool budget. Enforced by the turn loop.
+    max_tool_calls: 6
+    max_result_chars: 20000
+
+archive:
+  # Resolved from $LUNA_ARCHIVE_ROOT; falls back to the existing
+  # configured default (LunaData/archive/wiki) only. Never invented.
+  root: ${LUNA_ARCHIVE_ROOT}
+  artifact_output_root: ${LUNA_DATA_ROOT}/artifacts
+  search_default_limit: 8
+  search_max_limit: 20
+  read_default_lines: 200
+  read_max_lines: 500

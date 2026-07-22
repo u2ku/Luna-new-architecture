@@ -182,6 +182,13 @@ class ModelProvider(ABC):
     #: Stable identifier used in config and logs (e.g. ``"openai"``).
     name: str = ""
 
+    #: Whether the provider supports native (structured) function-calling.
+    #: When True, the turn loop sends ``tools`` on the wire and reads
+    #: ``ModelResponse.tool_calls``. When False, the loop uses the
+    #: prompt-JSON transport (tool calls emitted in a sentinel block in
+    #: the model's text). Set per provider.
+    supports_native_tools: bool = True
+
     @abstractmethod
     def complete(self, request: ModelRequest) -> ModelResponse:
         """Generate a single completion for ``request``.

@@ -14,6 +14,8 @@ from fastapi.responses import FileResponse
 from luna.api.routes import ChatService, create_api_router
 from luna.ledger import WorldLedger
 from luna.models import OpenAIProvider, WhooshdProvider
+from luna.tools.config import load_tools_config
+from luna.tools.executor import build_archive_registry
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +51,13 @@ def build_service(repo_root: Path = REPO_ROOT) -> ChatService:
         )
     ).expanduser()
 
+    # Propagate the resolved data root to the environment so env-based
+    # resolvers (notably recent_events.ledger_path, used by the context
+    # builder) resolve the same absolute ledger path the writer uses —
+    # regardless of the server's working directory. An explicit env value
+    # already set by the caller wins.
+    os.environ.setdefault("LUNA_DATA_ROOT", str(data_root))
+
     ledger_dir = data_root / str(paths_config.get("ledger", "ledger"))
     ledger = WorldLedger(
         path=ledger_dir / "world.jsonl",
@@ -81,6 +90,9 @@ def build_service(repo_root: Path = REPO_ROOT) -> ChatService:
     else:
         raise RuntimeError(f"Unsupported model provider: {provider_name}")
 
+    archive_config, tools_config = load_tools_config(repo_root, data_root=data_root)
+    registry = build_archive_registry()
+
     return ChatService(
         provider=provider,
         ledger=ledger,
@@ -93,6 +105,9 @@ def build_service(repo_root: Path = REPO_ROOT) -> ChatService:
         model_name=model_name,
         temperature=float(primary.get("temperature", 0.3)),
         max_tokens=int(primary.get("max_tokens", 800)),
+        registry=registry,
+        archive_config=archive_config,
+        tools_config=tools_config,
     )
 
 

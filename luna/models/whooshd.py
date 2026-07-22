@@ -64,6 +64,12 @@ class WhooshdProvider(ModelProvider):
     """
 
     name: str = "whooshd"
+    #: whooshd does not implement native function-calling upstream — it
+    #: accepts ``tools`` on the wire but will not emit ``tool_calls`` and
+    #: chokes on the ``content: null`` shape a model emits when it tries
+    #: to call a tool. The turn loop therefore uses the prompt-JSON
+    #: transport (sentinel block in text) for whooshd.
+    supports_native_tools: bool = False
     base_url: str = DEFAULT_BASE_URL
     default_model: str | None = DEFAULT_MODEL
     api_key: str | None = DEFAULT_API_KEY

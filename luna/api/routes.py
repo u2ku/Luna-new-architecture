@@ -1,9 +1,24 @@
-"""HTTP routes for the first Luna runtime vertical slice."""
+"""HTTP routes for the Luna runtime.
+
+The chat service turns one user message into one assistant reply. When
+archive tools are configured, the model may emit **structured** tool
+calls; the service validates each call, writes a paired
+``tool_call`` / ``tool_result`` receipt, executes the tool, feeds a
+bounded result back, and re-prompts — until the model produces a final
+reply or the per-turn budget (max 6 tool calls, max 20k result chars)
+is spent.
+
+Tools are never parsed from prose or Markdown code blocks. Only the
+structured ``tool_calls`` a provider returns count; text that merely
+mentions a tool name is ordinary content.
+"""
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query
@@ -11,12 +26,34 @@ from pydantic import BaseModel, Field
 
 from luna.context.builder import build_recent_messages
 from luna.ledger import WorldLedger
-from luna.models.base import Message, ModelError, ModelProvider, ModelRequest
+from luna.models.base import (
+    Message,
+    ModelError,
+    ModelProvider,
+    ModelRequest,
+    ToolSpec as ModelToolSpec,
+)
+from luna.tools.config import ArchiveConfig, ToolsConfig
+from luna.tools.executor import execute_with_receipts
+from luna.tools.protocol import ToolContext, ToolRequest
+from luna.tools.registry import ToolRegistry
+from luna.tools.transport import ToolTransport, select_transport
 
 # How many recent user/assistant turns the model gets as context.
-# Picked to fit comfortably under gemma's 32k context window with
-# room for the system prompt, the new turn, and the model's reply.
 CONTEXT_TURNS = 24
+
+# Strips any stray tool-protocol blocks the model echoed into its final
+# answer (prompt-JSON transport only). The loop never treats the final
+# turn as a call, so a ```tool_call here would already have been handled;
+# this is purely defensive against the model repeating a ```tool_result.
+_TOOL_BLOCK_RE = re.compile(r"```tool_(?:call|result)\b.*?```", re.DOTALL)
+
+
+def _strip_tool_artifacts(text: str) -> str:
+    cleaned = _TOOL_BLOCK_RE.sub("", text)
+    # Collapse runs of blank lines the removals may have left.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
 
 
 class ChatRequest(BaseModel):
@@ -49,6 +86,7 @@ class ChatResponse(BaseModel):
     model: str
     user_event_id: str
     assistant_event_id: str
+    tool_calls: int = 0
 
 
 @dataclass
@@ -67,6 +105,15 @@ class ChatService:
     # runtime can be deployed as a different agent name.
     agent_id: str = "agent:luna"
     agent_display_name: str = "Luna"
+    # Archive tools. When ``registry`` is None the service behaves as a
+    # plain chat service with no tool loop (backward compatible).
+    registry: ToolRegistry | None = None
+    archive_config: ArchiveConfig | None = None
+    tools_config: ToolsConfig | None = None
+
+    # ------------------------------------------------------------------
+    # Stream / event helpers
+    # ------------------------------------------------------------------
 
     def _build_stream_id(
         self,
@@ -103,6 +150,197 @@ class ChatService:
             "turn_id": turn_id,
             "payload": payload,
         }
+
+    # ------------------------------------------------------------------
+    # Tool loop
+    # ------------------------------------------------------------------
+
+    def _tool_specs(self) -> list[ModelToolSpec]:
+        """Model-layer tool schemas for every enabled archive tool."""
+        if self.registry is None:
+            return []
+        return [
+            ModelToolSpec(
+                name=spec.name,
+                description=spec.description,
+                parameters=spec.input_schema,
+            )
+            for spec in self.registry.list(only_enabled=True)
+        ]
+
+    def _tool_context(self, stream_id: str, turn_id: str) -> ToolContext:
+        ac = self.archive_config
+        return ToolContext(
+            archive_root=ac.root if ac is not None else None,
+            artifact_output_root=(
+                ac.artifact_output_root if ac is not None else None
+            ),
+            search_default_limit=ac.search_default_limit if ac else 8,
+            search_max_limit=ac.search_max_limit if ac else 20,
+            read_default_lines=ac.read_default_lines if ac else 200,
+            read_max_lines=ac.read_max_lines if ac else 500,
+            actor={
+                "id": self.agent_id,
+                "type": "agent",
+                "display_name": self.agent_display_name,
+            },
+            source={"platform": "luna-runtime"},
+            stream_id=stream_id,
+            turn_id=turn_id,
+        )
+
+    def _run_tool_loop(
+        self,
+        model_request: ModelRequest,
+        messages: list[Message],
+        transport: ToolTransport,
+        tool_specs: list[ModelToolSpec],
+        *,
+        stream_id: str,
+        turn_id: str,
+        max_calls: int,
+        max_result_chars: int,
+    ) -> tuple[Any, int]:
+        """Drive the tool loop via the chosen transport.
+
+        Returns ``(final_model_response, tool_call_count)``. Appends the
+        assistant tool-call turns and bounded tool-result messages to
+        ``messages`` in place so the next provider call sees them.
+
+        Both transports funnel through the same executor, so receipts,
+        validation, and the per-turn budget are identical. Only the way a
+        call is read out of the response (native ``tool_calls`` vs a
+        ```` ```tool_call ```` sentinel block) and the shape of the fed-back
+        result differ.
+        """
+        calls_used = 0
+        chars_used = 0
+        tool_call_count = 0
+        tool_actor = {
+            "id": self.agent_id,
+            "type": "agent",
+            "display_name": self.agent_display_name,
+        }
+
+        def build_request(tools: tuple[ModelToolSpec, ...]) -> ModelRequest:
+            return ModelRequest(
+                messages=tuple(messages),
+                model=model_request.model,
+                temperature=model_request.temperature,
+                max_tokens=model_request.max_tokens,
+                tools=tools,
+                metadata=model_request.metadata,
+            )
+
+        wire_tools = tuple(tool_specs) if transport.wants_tools_on_wire else ()
+
+        # Defensive ceiling on iterations; the real cap is max_calls.
+        for _ in range(max_calls + 2):
+            response = self.provider.complete(model_request)
+            extraction = transport.extract(response, call_index=calls_used + 1)
+
+            if extraction.malformed:
+                # A tool_call sentinel was present but unusable. Ask the
+                # model to re-emit; counts toward the budget (so a model
+                # that keeps emitting bad blocks cannot loop forever) but
+                # not toward the executed-call metric.
+                messages.append(transport.repair_message(extraction.malformed))
+                calls_used += 1
+                if calls_used >= max_calls:
+                    final = transport.force_final_message()
+                    if final is not None:
+                        messages.append(final)
+                    model_request = build_request(())
+                else:
+                    model_request = build_request(wire_tools)
+                continue
+
+            if not extraction.calls:
+                # No tool call → this is the final answer.
+                return response, tool_call_count
+
+            # Record the assistant's tool-call turn in history.
+            messages.append(transport.assistant_message(response))
+
+            # Native: run all calls (up to budget). Prompt: one per turn.
+            calls_to_run = (
+                extraction.calls if transport.wants_tools_on_wire else extraction.calls[:1]
+            )
+            budget_remaining = max_calls - calls_used
+            for call in calls_to_run:
+                if budget_remaining <= 0:
+                    # Budget spent before this call: native needs a tool
+                    # response to satisfy the provider contract; prompt
+                    # just stops running more. Not counted as executed.
+                    if transport.wants_tools_on_wire:
+                        messages.append(
+                            transport.tool_result_message(
+                                call, json.dumps({"error": "tool_budget_exceeded"})
+                            )
+                        )
+                    continue
+                request = ToolRequest(
+                    name=call.name, arguments=dict(call.arguments), call_id=call.call_id
+                )
+                context = self._tool_context(stream_id, turn_id)
+                result = execute_with_receipts(
+                    self.registry,
+                    request,
+                    context,
+                    self.ledger,
+                    actor=tool_actor,
+                    source={"platform": "luna-runtime"},
+                )
+                calls_used += 1
+                tool_call_count += 1
+                budget_remaining -= 1
+                payload = self._bounded_tool_payload(
+                    result, max_result_chars - chars_used
+                )
+                chars_used += len(payload)
+                messages.append(transport.tool_result_message(call, payload))
+                if chars_used >= max_result_chars:
+                    break
+
+            if calls_used >= max_calls:
+                final = transport.force_final_message()
+                if final is not None:
+                    messages.append(final)
+                model_request = build_request(())
+                continue
+            model_request = build_request(wire_tools)
+        # Should be unreachable; return whatever the last call produced.
+        return response, tool_call_count  # type: ignore[name-defined]
+
+    def _bounded_tool_payload(
+        self, result: Any, remaining_chars: int
+    ) -> str:
+        """Serialise a ToolResult to a JSON string within the char budget."""
+        try:
+            payload = {
+                "ok": result.ok,
+                "content": result.content,
+            }
+            if result.error is not None:
+                payload["error"] = {
+                    "code": result.error.code,
+                    "message": result.error.message,
+                }
+            text = json.dumps(payload, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = json.dumps({"ok": False, "error": "unserialisable_result"})
+
+        if len(text) > remaining_chars and remaining_chars > 0:
+            text = text[:remaining_chars]
+            # Keep it parseable by closing truncated JSON as a string.
+            text = json.dumps(
+                {"ok": result.ok, "content": text[:remaining_chars]}
+            )
+        return text
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
 
     def complete(self, request: ChatRequest) -> ChatResponse:
         session_id = request.session_id or str(uuid4())
@@ -192,15 +430,32 @@ class ChatService:
             if e.text
         )
 
+        messages: list[Message] = [
+            Message(role="system", content=self.system_prompt),
+            *context_messages,
+            Message(role="user", content=request.text),
+        ]
+
+        tool_specs = self._tool_specs()
+        transport = select_transport(self.provider) if tool_specs else None
+        # Augment the system prompt with the tool protocol for providers that
+        # carry it in the prompt (whooshd). Native transport returns it as-is.
+        if transport is not None:
+            messages[0] = Message(
+                role="system",
+                content=transport.augment_system_prompt(self.system_prompt, tool_specs),
+            )
+        wire_tools = (
+            tuple(tool_specs)
+            if (transport is not None and transport.wants_tools_on_wire)
+            else ()
+        )
         model_request = ModelRequest(
-            messages=(
-                Message(role="system", content=self.system_prompt),
-                *context_messages,
-                Message(role="user", content=request.text),
-            ),
+            messages=tuple(messages),
             model=self.model_name,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            tools=wire_tools,
             metadata={
                 "session_id": session_id,
                 "stream_id": stream_id,
@@ -211,7 +466,30 @@ class ChatService:
         )
 
         try:
-            model_response = self.provider.complete(model_request)
+            if transport is not None:
+                max_calls = (
+                    self.tools_config.max_tool_calls_per_turn
+                    if self.tools_config
+                    else 6
+                )
+                max_chars = (
+                    self.tools_config.max_result_chars_per_turn
+                    if self.tools_config
+                    else 20000
+                )
+                model_response, tool_call_count = self._run_tool_loop(
+                    model_request,
+                    messages,
+                    transport,
+                    tool_specs,
+                    stream_id=stream_id,
+                    turn_id=turn_id,
+                    max_calls=max_calls,
+                    max_result_chars=max_chars,
+                )
+            else:
+                model_response = self.provider.complete(model_request)
+                tool_call_count = 0
         except ModelError as exc:
             self.ledger.append(
                 event_type="system_event",
@@ -229,9 +507,15 @@ class ChatService:
             )
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        text = model_response.content.strip()
+        text = _strip_tool_artifacts(model_response.content or "").strip()
         if not text:
-            raise HTTPException(status_code=502, detail="Model returned an empty reply")
+            # The model produced only tool calls and no final reply, or
+            # the budget was exhausted mid-loop. Surface a bounded 502 so
+            # the caller can retry rather than silently storing nothing.
+            raise HTTPException(
+                status_code=502,
+                detail="Model returned an empty reply",
+            )
 
         assistant_destination: dict = {"platform": platform, "adapter": "fastapi"}
         if account_id:
@@ -263,6 +547,7 @@ class ChatService:
                     "total_tokens": model_response.usage.total_tokens,
                 },
                 "reply_to_event_id": user_event["event_id"],
+                "tool_calls": tool_call_count,
             },
         )
 
@@ -275,6 +560,7 @@ class ChatService:
             model=model_response.model or self.model_name or "",
             user_event_id=user_event["event_id"],
             assistant_event_id=assistant_event["event_id"],
+            tool_calls=tool_call_count,
         )
 
 
@@ -287,6 +573,7 @@ def create_api_router(service: ChatService) -> APIRouter:
             "ok": True,
             "service": "luna-runtime",
             "provider": service.provider.name,
+            "tools": [s.name for s in service._tool_specs()],
         }
 
     @router.post("/chat", response_model=ChatResponse)
