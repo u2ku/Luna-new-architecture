@@ -52,6 +52,59 @@ CREATE TABLE IF NOT EXISTS threads (
 );
 
 CREATE INDEX IF NOT EXISTS idx_threads_last ON threads(last_message_at DESC);
+
+-- Gmail API sync state (per account_email so multiple inboxes work)
+CREATE TABLE IF NOT EXISTS gmail_state (
+    account_email     TEXT PRIMARY KEY,
+    last_history_id   TEXT,
+    last_sync_at      TEXT NOT NULL
+);
+
+-- Transport IDs — maps Gmail-side IDs to our ledger/stream IDs.
+-- Lets the sync skip messages we've already processed without
+-- round-tripping to the ledger.
+CREATE TABLE IF NOT EXISTS gmail_messages (
+    gmail_message_id  TEXT PRIMARY KEY,            -- Gmail API message id
+    rfc822_message_id TEXT NOT NULL,               -- RFC 822 Message-ID header
+    thread_id         TEXT NOT NULL,               -- Gmail thread id
+    account_email     TEXT NOT NULL,
+    from_addr         TEXT NOT NULL,
+    subject           TEXT,
+    snippet           TEXT,
+    received_at       TEXT NOT NULL,               -- when Gmail saw it
+    synced_at         TEXT NOT NULL,               -- when we ingested
+    stream_id         TEXT NOT NULL,
+    ledger_event_id   TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'synced'  -- 'synced' | 'failed'
+);
+
+CREATE INDEX IF NOT EXISTS idx_gmail_messages_thread ON gmail_messages(thread_id);
+
+-- Outbox: replies Luna generated but hasn't sent yet.
+-- The read-side pipeline writes here after generating the reply;
+-- a separate "send" step consumes it and calls gmail.send().
+-- Credentials live in secrets/gmail/, NOT in this DB.
+CREATE TABLE IF NOT EXISTS pending_replies (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_id            TEXT NOT NULL,
+    turn_id              TEXT NOT NULL,
+    source_user_event_id TEXT NOT NULL,            -- the user_message we replied to
+    source_message_id    TEXT NOT NULL,            -- the RFC 822 Message-ID
+    to_addr              TEXT NOT NULL,
+    from_addr            TEXT NOT NULL,
+    subject              TEXT,
+    in_reply_to          TEXT,
+    references_json      TEXT,                     -- JSON list of message-ids
+    body                 TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'pending',  -- 'pending'|'sending'|'sent'|'failed'
+    created_at           TEXT NOT NULL,
+    sent_at              TEXT,
+    sent_gmail_message_id TEXT,
+    error                TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_replies_status ON pending_replies(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_pending_replies_stream ON pending_replies(stream_id);
 """
 
 
@@ -180,3 +233,159 @@ class EmailStore:
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Gmail transport data ───────────────────────────────────────────
+
+    def record_gmail_message(
+        self,
+        *,
+        gmail_message_id: str,
+        rfc822_message_id: str,
+        thread_id: str,
+        account_email: str,
+        from_addr: str,
+        subject: str | None,
+        snippet: str | None,
+        received_at: str,
+        stream_id: str,
+        ledger_event_id: str,
+        status: str = "synced",
+    ) -> None:
+        """Record a Gmail message we've ingested. Idempotent on
+        ``gmail_message_id`` so a redelivered history tick is safe.
+        """
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO gmail_messages (
+                    gmail_message_id, rfc822_message_id, thread_id, account_email,
+                    from_addr, subject, snippet, received_at, synced_at,
+                    stream_id, ledger_event_id, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(gmail_message_id) DO UPDATE SET
+                    ledger_event_id = excluded.ledger_event_id,
+                    status          = excluded.status
+                """,
+                (
+                    gmail_message_id, rfc822_message_id, thread_id, account_email,
+                    from_addr, subject, snippet, received_at, now,
+                    stream_id, ledger_event_id, status,
+                ),
+            )
+            conn.commit()
+
+    def get_gmail_message(self, gmail_message_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM gmail_messages WHERE gmail_message_id = ?",
+                (gmail_message_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_gmail_state(self, account_email: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM gmail_state WHERE account_email = ?",
+                (account_email,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_gmail_state(
+        self, account_email: str, last_history_id: str | None
+    ) -> None:
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO gmail_state (account_email, last_history_id, last_sync_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(account_email) DO UPDATE SET
+                    last_history_id = excluded.last_history_id,
+                    last_sync_at    = excluded.last_sync_at
+                """,
+                (account_email, last_history_id, now),
+            )
+            conn.commit()
+
+    # ── Outbox (pending replies) ───────────────────────────────────────
+
+    def enqueue_reply(
+        self,
+        *,
+        stream_id: str,
+        turn_id: str,
+        source_user_event_id: str,
+        source_message_id: str,
+        to_addr: str,
+        from_addr: str,
+        subject: str | None,
+        in_reply_to: str | None,
+        references: list[str] | None,
+        body: str,
+    ) -> int:
+        """Insert a pending reply. Returns the row id."""
+        now = _now_iso()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO pending_replies (
+                    stream_id, turn_id, source_user_event_id, source_message_id,
+                    to_addr, from_addr, subject, in_reply_to, references_json,
+                    body, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stream_id, turn_id, source_user_event_id, source_message_id,
+                    to_addr, from_addr, subject, in_reply_to,
+                    json.dumps(references or []),
+                    body, "pending", now,
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid or 0
+
+    def list_pending_replies(
+        self, *, status: str = "pending", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM pending_replies WHERE status = ? "
+                "ORDER BY created_at ASC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("references_json"):
+                try:
+                    d["references"] = json.loads(d["references_json"])
+                except json.JSONDecodeError:
+                    d["references"] = []
+            else:
+                d["references"] = []
+            out.append(d)
+        return out
+
+    def mark_reply_status(
+        self,
+        reply_id: int,
+        status: str,
+        *,
+        sent_gmail_message_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        now = _now_iso()
+        with self._connect() as conn:
+            if status == "sent":
+                conn.execute(
+                    "UPDATE pending_replies SET status = ?, sent_at = ?, "
+                    "sent_gmail_message_id = ?, error = NULL WHERE id = ?",
+                    (status, now, sent_gmail_message_id, reply_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE pending_replies SET status = ?, error = ? WHERE id = ?",
+                    (status, error, reply_id),
+                )
+            conn.commit()

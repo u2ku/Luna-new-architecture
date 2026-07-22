@@ -1,40 +1,55 @@
 """Email channel adapter.
 
-Translate between RFC 822 / RFC 5322 email and Luna world events.
+Three transports share the same event shape (``world_event``):
 
-Inbound: a parsed ``email.message.EmailMessage`` (or bytes/string).
+* **Gmail API** (read + outbox + send) — preferred; OAuth2 via
+  ``LunaData/secrets/gmail/{credentials,token}.json``
+* **SMTP** (send only) — fallback when the API isn't configured.
+  App password or OAuth2 XOAUTH2.
+* **IMAP** (read) — not implemented yet; the ``receiver`` module
+  is shared with the API path and is ready for it.
+
 The adapter derives ``stream_id`` from ``From`` + a thread key
 (typically ``In-Reply-To`` or the first ``References`` entry,
 falling back to ``Message-ID``).
-
-Outbound: a properly-threaded ``MIMEMultipart`` message with the
-Luna response as the body and the proper ``In-Reply-To`` /
-``References`` headers so the recipient's mail client groups the
-reply with the prior conversation.
-
-Deployment
-----------
-
-SMTP credentials are NEVER in source. Set them in ``.env`` (which
-is gitignored) using the placeholders in ``.env.example``. Two
-auth modes are supported; OAuth wins when both are configured.
-
-* **App password** — set ``LUNA_EMAIL_SMTP_USERNAME`` and
-  ``LUNA_EMAIL_SMTP_PASSWORD``. For Gmail, generate an app
-  password at https://myaccount.google.com/apppasswords.
-* **OAuth2 XOAUTH2** — register a Google Cloud OAuth client
-  (Desktop app type), run ``scripts/email_bootstrap_oauth.py``
-  once to walk the consent flow and capture the
-  ``refresh_token``, then set ``LUNA_EMAIL_OAUTH_CLIENT_ID`` /
-  ``_SECRET`` / ``_REFRESH_TOKEN`` (and optionally
-  ``_SCOPES``; default is send-only).
-
-``Security`` is one of:
-
-    * ``starttls`` (default) — plaintext on connect, ``STARTTLS`` upgrade
-    * ``tls``                 — implicit TLS (port 465)
-    * ``none``                — plaintext (do not use on the public internet)
-
-The SQLite index lives at ``$LUNA_DATA_ROOT/email/email.db``; the
-directory and schema are created on first open.
 """
+
+from .config import SmtpConfig, default_from_address
+from .credentials import GmailCredentials, default_secrets_dir
+from .gmail import GmailAPIError, GmailClient
+from .inbox import InboxSync
+from .oauth import (
+    CachedTokenSource,
+    OAuthConfig,
+    OAuthError,
+    TokenResponse,
+    access_token_from_refresh,
+    xoauth2_string,
+)
+from .receiver import EmailReceiver, _parse_address, _thread_id
+from .sender import EmailSender, build_reply, send_via_smtp
+from .store import EmailStore
+
+
+__all__ = [
+    "SmtpConfig",
+    "default_from_address",
+    "GmailCredentials",
+    "default_secrets_dir",
+    "GmailClient",
+    "GmailAPIError",
+    "OAuthConfig",
+    "OAuthError",
+    "TokenResponse",
+    "access_token_from_refresh",
+    "xoauth2_string",
+    "CachedTokenSource",
+    "EmailStore",
+    "EmailReceiver",
+    "EmailSender",
+    "build_reply",
+    "send_via_smtp",
+    "_parse_address",
+    "_thread_id",
+    "InboxSync",
+]
