@@ -12,6 +12,27 @@ Three transports share the same event shape (``world_event``):
 The adapter derives ``stream_id`` from ``From`` + a thread key
 (typically ``In-Reply-To`` or the first ``References`` entry,
 falling back to ``Message-ID``).
+
+OAuth scopes
+------------
+
+The Gmail default scope is the union the channel needs end-to-end:
+
+* ``https://www.googleapis.com/auth/gmail.readonly`` — list +
+  read messages (the inbox sync)
+* ``https://www.googleapis.com/auth/gmail.compose``  — create
+  / update drafts, send mail (the outbox flush)
+
+Override via ``LUNA_EMAIL_OAUTH_SCOPES`` in ``.env``. For
+send-only deployments, set
+``LUNA_EMAIL_OAUTH_SCOPES="https://www.googleapis.com/auth/gmail.send"``.
+
+Re-authorization
+----------------
+
+If you change scopes, delete ``LunaData/secrets/gmail/token.json``
+and re-run ``scripts/email_bootstrap_oauth.py`` so Google issues
+a token with the new scope set.
 """
 
 from .config import SmtpConfig, default_from_address

@@ -182,7 +182,7 @@ def test_from_env_reads_env_vars(monkeypatch) -> None:
     assert config.scopes == "https://example.com/scope"
 
 
-def test_from_env_defaults_to_send_only_scope(monkeypatch) -> None:
+def test_from_env_defaults_to_read_and_compose(monkeypatch) -> None:
     for key in (
         "LUNA_EMAIL_OAUTH_CLIENT_ID",
         "LUNA_EMAIL_OAUTH_CLIENT_SECRET",
@@ -192,5 +192,8 @@ def test_from_env_defaults_to_send_only_scope(monkeypatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
     config = OAuthConfig.from_env()
-    assert config.scopes == "https://www.googleapis.com/auth/gmail.send"
+    # The default scope is the union the email channel needs:
+    # inbox sync (gmail.readonly) + drafts/send (gmail.compose).
+    assert "gmail.readonly" in config.scopes
+    assert "gmail.compose" in config.scopes
     assert not config.is_configured()

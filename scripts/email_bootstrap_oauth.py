@@ -45,7 +45,13 @@ from threading import Event
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-DEFAULT_SCOPES = "https://www.googleapis.com/auth/gmail.send"
+# Union of scopes the email channel needs end-to-end:
+#   gmail.readonly — list + read messages (inbox sync)
+#   gmail.compose  — create / update drafts, send mail (outbox flush)
+DEFAULT_SCOPES = (
+    "https://www.googleapis.com/auth/gmail.readonly "
+    "https://www.googleapis.com/auth/gmail.compose"
+)
 REDIRECT_URI = "http://localhost:8765/callback"
 REDIRECT_PORT = 8765
 
