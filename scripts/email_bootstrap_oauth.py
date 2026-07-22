@@ -1,8 +1,8 @@
 """One-time OAuth consent flow for the email channel.
 
-Walks the Google OAuth2 authorization code flow and prints the
-``refresh_token`` you save into ``.env`` as
-``LUNA_EMAIL_OAUTH_REFRESH_TOKEN``.
+Walks the Google OAuth2 authorization code flow and writes the
+resulting token bundle to ``$LUNA_DATA_ROOT/secrets/gmail/token.json``.
+The bundle is what :class:`GmailCredentials` reads back at runtime.
 
 Prerequisites
 ------------
@@ -25,8 +25,12 @@ Usage
 The script will:
     1. Open your browser to Google's consent screen
     2. After you approve, Google redirects to a local HTTP server
-    3. The script exchanges the auth code for tokens and prints
-       the refresh_token
+    3. The script exchanges the auth code for tokens and writes
+       the full token bundle to
+       ``$LUNA_DATA_ROOT/secrets/gmail/token.json``
+    4. Also prints the ``LUNA_EMAIL_OAUTH_REFRESH_TOKEN`` value
+       for callers that want to use env-var auth instead of the
+       on-disk bundle (e.g. serverless deployments).
 
 The script is deliberately offline (no extra dependencies) — it
 uses Python's stdlib ``http.server`` and ``webbrowser``.
@@ -40,7 +44,9 @@ import sys
 import urllib.parse
 import urllib.request
 import webbrowser
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from threading import Event
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -54,6 +60,17 @@ DEFAULT_SCOPES = (
 )
 REDIRECT_URI = "http://localhost:8765/callback"
 REDIRECT_PORT = 8765
+
+
+def _default_secrets_dir() -> Path:
+    """Mirror the runtime's default for the secrets dir."""
+    override = os.environ.get("LUNA_GMAIL_SECRETS_DIR", "").strip()
+    if override:
+        return Path(override)
+    root = os.environ.get("LUNA_DATA_ROOT", "").strip()
+    if not root:
+        return Path("LunaData") / "secrets" / "gmail"
+    return Path(root) / "secrets" / "gmail"
 
 
 def _build_auth_url(client_id: str, scopes: str) -> str:
@@ -168,15 +185,51 @@ def main() -> int:
         )
         return 1
 
-    print()
-    print("  ✓ got tokens. Save these into .env (gitignored):")
-    print()
-    print(f"    LUNA_EMAIL_OAUTH_REFRESH_TOKEN={refresh}")
-    print()
-    print(
-        "  Verify the token works with: "
-        "luna.channels.email.oauth.access_token_from_refresh(...)"
+    # Build the on-disk token bundle in google-auth's standard shape
+    # so GmailCredentials.from_secrets_dir can read it back unchanged.
+    expires_in = int(tokens.get("expires_in", 3600))
+    expiry = (
+        datetime.now(timezone.utc).timestamp() + expires_in
     )
+    expiry_iso = datetime.fromtimestamp(expiry, tz=timezone.utc).isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z")
+    bundle = {
+        "token": tokens.get("access_token", ""),
+        "refresh_token": refresh,
+        "token_uri": GOOGLE_TOKEN_URL,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scopes": scopes.split(),
+        "universe_domain": "googleapis.com",
+        "account": "",
+        "expiry": expiry_iso,
+    }
+
+    secrets_dir = _default_secrets_dir()
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    token_path = secrets_dir / "token.json"
+    token_path.write_text(
+        json.dumps(bundle, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    try:
+        token_path.chmod(0o600)
+    except OSError:
+        pass
+
+    print()
+    print(f"  ✓ token bundle written to {token_path}")
+    print()
+    print("  Runtime picks this up automatically. To verify:")
+    print(
+        "    python3 -c \"from luna.channels.email import "
+        "GmailCredentials; c = GmailCredentials.from_secrets_dir(); "
+        "print(c.access_token()[:24] + '…')\""
+    )
+    print()
+    print("  (Optional) for env-only auth, also save the refresh token:")
+    print(f"    LUNA_EMAIL_OAUTH_REFRESH_TOKEN={refresh}")
     return 0
 
 
