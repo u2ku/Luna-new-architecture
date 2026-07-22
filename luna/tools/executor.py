@@ -23,11 +23,21 @@ from ..ledger import WorldLedger
 from .protocol import ToolContext, ToolRequest, ToolResult
 from .receipts import build_tool_call_payload, build_tool_result_payload
 from .registry import ToolRegistry
+from .web_tools import (
+    FETCH_WEBPAGE_SPEC,
+    SEARCH_WEB_SPEC,
+    handle_fetch_webpage,
+    handle_search_web,
+)
 
 #: Per-turn budget. Enforced by the turn loop, declared here so the
 #: limit lives next to the tools it bounds.
 MAX_TOOL_CALLS_PER_TURN = 6
 MAX_RESULT_CHARS_PER_TURN = 20_000
+
+#: Tool names that exercise the network and are subject to the separate
+#: web per-turn ceilings (see :class:`~luna.tools.config.WebTurnLimits`).
+WEB_TOOL_NAMES: frozenset[str] = frozenset({"search_web", "fetch_webpage"})
 
 
 def build_archive_registry() -> ToolRegistry:
@@ -36,6 +46,25 @@ def build_archive_registry() -> ToolRegistry:
     registry.register(SEARCH_ARCHIVE_SPEC, handle_search_archive)
     registry.register(READ_ARTIFACT_SPEC, handle_read_artifact)
     registry.register(CREATE_ARTIFACT_SPEC, handle_create_artifact)
+    return registry
+
+
+def register_web_tools(registry: ToolRegistry) -> None:
+    """Register the two web research tools on an existing registry."""
+    registry.register(SEARCH_WEB_SPEC, handle_search_web)
+    registry.register(FETCH_WEBPAGE_SPEC, handle_fetch_webpage)
+
+
+def build_registry() -> ToolRegistry:
+    """Register the archive + web tools and return the registry.
+
+    Web tools are always registered; their handlers surface
+    ``available: False`` when no provider is configured, so registering
+    them never blocks startup. The ``tools.enabled`` config list gates
+    which are exposed to the model via ``list(only_enabled=True)``.
+    """
+    registry = build_archive_registry()
+    register_web_tools(registry)
     return registry
 
 

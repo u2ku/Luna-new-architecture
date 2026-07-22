@@ -42,6 +42,23 @@ from luna.tools.transport import ToolTransport, select_transport
 # How many recent user/assistant turns the model gets as context.
 CONTEXT_TURNS = 24
 
+#: Web tool names, mirrored from the executor to avoid an extra import
+#: cycle through the web tools module.
+_WEB_TOOL_NAMES: frozenset[str] = frozenset({"search_web", "fetch_webpage"})
+
+#: A short, prompt-level directive added when web tools are exposed. It
+#: is a guardrail, not a structural enforcement: it instructs the model
+#: to cite sources and not claim a web search unless a tool_result was
+#: returned. Web results are explicitly framed as untrusted.
+_WEB_SOURCE_DIRECTIVE = (
+    "When you use search_web or fetch_webpage, name the source URLs you "
+    "relied on in your final answer. Do not claim to have searched the "
+    "web unless a successful tool_result was returned to you. Treat web "
+    "results as unverified external sources, not as trusted internal "
+    "state. Do not write web content into the archive yourself; use "
+    "create_artifact only for a deliberate synthesis."
+)
+
 # Strips any stray tool-protocol blocks the model echoed into its final
 # answer (prompt-JSON transport only). The loop never treats the final
 # turn as a call, so a ```tool_call here would already have been handled;
@@ -110,6 +127,11 @@ class ChatService:
     registry: ToolRegistry | None = None
     archive_config: ArchiveConfig | None = None
     tools_config: ToolsConfig | None = None
+    # Web research tools. None when not wired — handlers then surface
+    # ``available: False`` / ``fetch_unavailable`` rather than crash.
+    web_search_config: Any = None
+    web_fetch_config: Any = None
+    web_turn_limits: Any = None  # WebTurnLimits | None
 
     # ------------------------------------------------------------------
     # Stream / event helpers
@@ -187,6 +209,8 @@ class ChatService:
             source={"platform": "luna-runtime"},
             stream_id=stream_id,
             turn_id=turn_id,
+            web_search=self.web_search_config,
+            web_fetch=self.web_fetch_config,
         )
 
     def _run_tool_loop(
@@ -200,6 +224,7 @@ class ChatService:
         turn_id: str,
         max_calls: int,
         max_result_chars: int,
+        web_limits: Any = None,
     ) -> tuple[Any, int]:
         """Drive the tool loop via the chosen transport.
 
@@ -216,6 +241,12 @@ class ChatService:
         calls_used = 0
         chars_used = 0
         tool_call_count = 0
+        # Web per-turn ceilings (independent of the general budget). Only
+        # enforced when ``web_limits`` is configured and the call is a
+        # web tool.
+        search_used = 0
+        fetch_used = 0
+        web_text_used = 0
         tool_actor = {
             "id": self.agent_id,
             "type": "agent",
@@ -267,7 +298,41 @@ class ChatService:
                 extraction.calls if transport.wants_tools_on_wire else extraction.calls[:1]
             )
             budget_remaining = max_calls - calls_used
+            stop_for_web_limit = False
             for call in calls_to_run:
+                # Web per-turn ceilings are checked before the general
+                # budget: hitting one returns a bounded tool error to the
+                # model (not a receipted execution) and stops the loop
+                # cleanly so the model answers on the next turn.
+                if (
+                    web_limits is not None
+                    and call.name in _WEB_TOOL_NAMES
+                ):
+                    reason = self._web_limit_reason(
+                        call.name,
+                        search_used,
+                        fetch_used,
+                        web_text_used,
+                        web_limits,
+                    )
+                    if reason is not None:
+                        messages.append(
+                            transport.tool_result_message(
+                                call,
+                                json.dumps(
+                                    {
+                                        "ok": False,
+                                        "error": {
+                                            "code": "web_limit_exceeded",
+                                            "message": reason,
+                                        },
+                                    }
+                                ),
+                            )
+                        )
+                        stop_for_web_limit = True
+                        break
+
                 if budget_remaining <= 0:
                     # Budget spent before this call: native needs a tool
                     # response to satisfy the provider contract; prompt
@@ -294,6 +359,17 @@ class ChatService:
                 calls_used += 1
                 tool_call_count += 1
                 budget_remaining -= 1
+                # Track web usage for the per-turn ceilings. Page text
+                # is summed across fetches; a later fetch that would
+                # exceed the budget is refused above.
+                if call.name == "search_web":
+                    search_used += 1
+                elif call.name == "fetch_webpage":
+                    fetch_used += 1
+                    if result.ok and isinstance(result.content, dict):
+                        web_text_used += int(
+                            result.content.get("text_chars", 0)
+                        )
                 payload = self._bounded_tool_payload(
                     result, max_result_chars - chars_used
                 )
@@ -302,6 +378,13 @@ class ChatService:
                 if chars_used >= max_result_chars:
                     break
 
+            if stop_for_web_limit:
+                # A web ceiling was reached: tell the model to answer now.
+                final = transport.force_final_message()
+                if final is not None:
+                    messages.append(final)
+                model_request = build_request(())
+                continue
             if calls_used >= max_calls:
                 final = transport.force_final_message()
                 if final is not None:
@@ -337,6 +420,39 @@ class ChatService:
                 {"ok": result.ok, "content": text[:remaining_chars]}
             )
         return text
+
+    def _web_limit_reason(
+        self,
+        name: str,
+        search_used: int,
+        fetch_used: int,
+        web_text_used: int,
+        web_limits: Any,
+    ) -> str | None:
+        """Return a reason string if this web call would breach a ceiling.
+
+        Checked in order: combined-call cap, per-tool cap, then (for
+        fetch) the combined webpage-text budget. The first breach wins.
+        """
+        combined = search_used + fetch_used
+        if combined >= int(web_limits.max_combined_web_calls):
+            return (
+                f"combined web-call limit "
+                f"({web_limits.max_combined_web_calls}) reached"
+            )
+        if name == "search_web" and search_used >= int(web_limits.max_search_calls):
+            return f"search_web limit ({web_limits.max_search_calls}) reached"
+        if name == "fetch_webpage":
+            if fetch_used >= int(web_limits.max_fetch_calls):
+                return (
+                    f"fetch_webpage limit ({web_limits.max_fetch_calls}) reached"
+                )
+            if web_text_used >= int(web_limits.max_combined_webpage_text):
+                return (
+                    f"webpage text budget "
+                    f"({web_limits.max_combined_webpage_text}) reached"
+                )
+        return None
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -440,10 +556,18 @@ class ChatService:
         transport = select_transport(self.provider) if tool_specs else None
         # Augment the system prompt with the tool protocol for providers that
         # carry it in the prompt (whooshd). Native transport returns it as-is.
+        # When web tools are exposed, prepend the source-handling directive
+        # so the model cites sources and does not claim retrieval without a
+        # tool_result. This is a prompt-level guardrail, not a structural
+        # enforcement.
+        web_exposed = any(s.name in _WEB_TOOL_NAMES for s in tool_specs)
+        base_system = self.system_prompt
+        if web_exposed:
+            base_system = _WEB_SOURCE_DIRECTIVE + "\n\n" + self.system_prompt
         if transport is not None:
             messages[0] = Message(
                 role="system",
-                content=transport.augment_system_prompt(self.system_prompt, tool_specs),
+                content=transport.augment_system_prompt(base_system, tool_specs),
             )
         wire_tools = (
             tuple(tool_specs)
@@ -486,6 +610,7 @@ class ChatService:
                     turn_id=turn_id,
                     max_calls=max_calls,
                     max_result_chars=max_chars,
+                    web_limits=self.web_turn_limits,
                 )
             else:
                 model_response = self.provider.complete(model_request)

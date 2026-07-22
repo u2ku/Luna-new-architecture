@@ -14,8 +14,8 @@ from fastapi.responses import FileResponse
 from luna.api.routes import ChatService, create_api_router
 from luna.ledger import WorldLedger
 from luna.models import OpenAIProvider, WhooshdProvider
-from luna.tools.config import load_tools_config
-from luna.tools.executor import build_archive_registry
+from luna.tools.config import build_web_config, load_tools_config
+from luna.tools.executor import build_registry
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -91,7 +91,8 @@ def build_service(repo_root: Path = REPO_ROOT) -> ChatService:
         raise RuntimeError(f"Unsupported model provider: {provider_name}")
 
     archive_config, tools_config = load_tools_config(repo_root, data_root=data_root)
-    registry = build_archive_registry()
+    registry = build_registry()
+    web_config = build_web_config(repo_root, data_root=data_root)
 
     return ChatService(
         provider=provider,
@@ -108,6 +109,9 @@ def build_service(repo_root: Path = REPO_ROOT) -> ChatService:
         registry=registry,
         archive_config=archive_config,
         tools_config=tools_config,
+        web_search_config=web_config.search,
+        web_fetch_config=web_config.fetch,
+        web_turn_limits=web_config.turn_limits,
     )
 
 

@@ -165,6 +165,11 @@ class ToolResult:
     artifact_ids: tuple[str, ...] = ()
     error: ToolError | None = None
     duration_ms: int = 0
+    #: Optional bounded receipt summary (web tools set this so the
+    #: ``tool_result`` event records generic execution facts — query,
+    #: provider, result count, URLs, hashes — without persisting full
+    #: snippets or page text. The receipts writer sanitises it.
+    receipt: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -206,3 +211,7 @@ class ToolContext:
     source: Mapping[str, Any]
     stream_id: str
     turn_id: str
+    #: Web research tool configuration (None when web tools are not
+    #: wired — handlers then surface ``available: False``).
+    web_search: Any = None
+    web_fetch: Any = None

@@ -4,6 +4,8 @@ tools:
     - search_archive
     - read_artifact
     - create_artifact
+    - search_web
+    - fetch_webpage
   per_turn:
     # Bounded per-turn tool budget. Enforced by the turn loop.
     max_tool_calls: 6
@@ -18,3 +20,37 @@ archive:
   search_max_limit: 20
   read_default_lines: 200
   read_max_lines: 500
+
+web:
+  # Search provider selection. "none" (the default) keeps Luna running
+  # with search_web marked unavailable — it does not block startup.
+  # Set LUNA_WEB_SEARCH_PROVIDER to "searxng" or "brave" to enable.
+  search:
+    provider: ${LUNA_WEB_SEARCH_PROVIDER:-none}
+    default_limit: 5
+    max_limit: 10
+    timeout_seconds: 15
+    searxng_url: ${LUNA_SEARXNG_URL}
+    brave_api_key: ${LUNA_BRAVE_SEARCH_API_KEY}
+
+  fetch:
+    connect_timeout_seconds: 5
+    read_timeout_seconds: 15
+    total_timeout_seconds: 20
+    max_redirects: 5
+    max_response_bytes: 2000000
+    default_text_chars: 20000
+    max_text_chars: 50000
+    allowed_ports:
+      - 80
+      - 443
+    user_agent: LunaRuntime/0.1
+    max_links: 50
+
+  per_turn:
+    # Per-turn ceilings on web-tool calls. Enforced by the turn loop
+    # in addition to the general max_tool_calls budget above.
+    max_search_calls: 3
+    max_fetch_calls: 5
+    max_combined_web_calls: 8
+    max_combined_webpage_text: 50000

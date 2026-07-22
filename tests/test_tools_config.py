@@ -41,7 +41,10 @@ def test_load_config_archive_root_env_override(monkeypatch, tmp_path):
     assert ac.search_max_limit == 20
     assert ac.read_default_lines == 200
     assert ac.read_max_lines == 500
-    assert tc.enabled == ["search_archive", "read_artifact", "create_artifact"]
+    assert tc.enabled == [
+        "search_archive", "read_artifact", "create_artifact",
+        "search_web", "fetch_webpage",
+    ]
     assert tc.max_tool_calls_per_turn == 6
     assert tc.max_result_chars_per_turn == 20000
 

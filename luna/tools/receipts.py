@@ -126,4 +126,9 @@ def build_tool_result_payload(
     if result.error is not None:
         payload["error_code"] = result.error.code
         payload["error_message"] = result.error.message
+    # Web tools attach a bounded receipt summary (no full snippets or
+    # page text). Sanitise it through the same truncation/redaction the
+    # arguments go through so credentials never reach the ledger.
+    if getattr(result, "receipt", None):
+        payload["receipt"] = _sanitize_value(dict(result.receipt))
     return payload

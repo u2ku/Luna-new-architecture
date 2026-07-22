@@ -173,6 +173,7 @@ class ToolRegistry:
             artifact_ids=result.artifact_ids,
             error=result.error,
             duration_ms=duration if not result.duration_ms else result.duration_ms,
+            receipt=result.receipt,
         )
 
     def _fail(
