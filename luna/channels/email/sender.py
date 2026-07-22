@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from ...ledger import WorldLedger
 from .config import SmtpConfig
+from .oauth import CachedTokenSource, OAuthConfig, xoauth2_string
 from .store import EmailStore
 
 
@@ -53,11 +54,21 @@ def build_reply(
     return msg
 
 
-def send_via_smtp(msg: EmailMessage, config: SmtpConfig) -> None:
+def send_via_smtp(
+    msg: EmailMessage,
+    config: SmtpConfig,
+    oauth: OAuthConfig | None = None,
+    *,
+    token_source: CachedTokenSource | None = None,
+) -> None:
     """Deliver ``msg`` via SMTP. Returns ``None`` on success and on
     any non-fatal delivery error — the caller is expected to inspect
     the store; a more sophisticated implementation would surface
     the error and let the cron decide whether to retry.
+
+    When ``oauth`` is supplied, XOAUTH2 is used instead of plain
+    password auth. The ``token_source`` is a process-local cache
+    so we don't hit Google's token endpoint on every send.
     """
     try:
         with smtplib.SMTP(host=config.host, port=config.port, timeout=15) as smtp:
@@ -65,8 +76,17 @@ def send_via_smtp(msg: EmailMessage, config: SmtpConfig) -> None:
             if config.security == "starttls":
                 smtp.starttls()
                 smtp.ehlo()
-            if config.username and config.password:
+
+            if oauth and oauth.is_configured():
+                src = token_source or CachedTokenSource(oauth)
+                access_token = src.get()
+                # smtp.auth() takes a string challenge/response
+                # callable; we pre-build the SASL string.
+                smtp.auth("XOAUTH2", lambda: xoauth2_string(config.username or "", access_token))
+            elif config.username and config.password:
                 smtp.login(config.username, config.password)
+            # else: anonymous relay (LAN test only)
+
             smtp.send_message(msg)
     except (smtplib.SMTPException, socket.error, OSError):
         # Caller is expected to inspect the store; do not raise.
@@ -79,7 +99,10 @@ class EmailSender:
     Given a Luna ``assistant_message`` event plus the thread
     context (the original From / To / Subject / In-Reply-To),
     build the reply, record it in the SQLite store, and deliver
-    via SMTP if configured.
+    via SMTP if configured. SMTP auth supports both an app
+    password (``config.username`` + ``config.password``) and
+    OAuth2 XOAUTH2 (``oauth``); OAuth wins when both are
+    configured.
     """
 
     def __init__(
@@ -88,16 +111,21 @@ class EmailSender:
         store: EmailStore,
         *,
         smtp: SmtpConfig | None = None,
+        oauth: OAuthConfig | None = None,
         from_addr: str | None = None,
     ) -> None:
         self.ledger = ledger
         self.store = store
         self.smtp = smtp
+        self.oauth = oauth
         self.from_addr = from_addr or ""
         if not self.from_addr:
             raise ValueError(
                 "EmailSender needs a from_addr (or set LUNA_EMAIL_FROM_ADDRESS)"
             )
+        # Token source is created lazily on first send so the
+        # constructor stays cheap when SMTP isn't configured.
+        self._token_source: CachedTokenSource | None = None
 
     def send(
         self,
@@ -130,7 +158,13 @@ class EmailSender:
 
         outbound_status = "queued"
         if self.smtp and self.smtp.is_configured():
-            send_via_smtp(msg, self.smtp)
+            token_source: CachedTokenSource | None = None
+            if self.oauth and self.oauth.is_configured():
+                token_source = self._token_source or CachedTokenSource(self.oauth)
+                self._token_source = token_source
+            send_via_smtp(
+                msg, self.smtp, oauth=self.oauth, token_source=token_source
+            )
             outbound_status = "sent"
 
         # Find the original inbound message so we can record the
