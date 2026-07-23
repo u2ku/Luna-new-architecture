@@ -150,6 +150,11 @@ class CreatedArtifact:
     category: str
     created_at: str
     path: Path
+    #: sha256 of the UTF-8 bytes actually written to disk (header + body).
+    #: Proves what was durably stored without the receipt holding the body.
+    content_hash: str = ""
+    #: Number of UTF-8 bytes written to the artifact file.
+    bytes_written: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -158,6 +163,8 @@ class CreatedArtifact:
             "title": self.title,
             "category": self.category,
             "created_at": self.created_at,
+            "content_hash": self.content_hash,
+            "bytes_written": self.bytes_written,
         }
 
 
@@ -229,6 +236,8 @@ def create_artifact(
         except FileNotFoundError:
             pass
 
+    body_bytes = body.encode("utf-8")
+    content_hash = hashlib.sha256(body_bytes).hexdigest()
     return CreatedArtifact(
         artifact_id=artifact_id,
         relative_path=rel_path.as_posix(),
@@ -236,6 +245,8 @@ def create_artifact(
         category=category,
         created_at=when.isoformat(timespec="seconds"),
         path=final_path,
+        content_hash=content_hash,
+        bytes_written=len(body_bytes),
     )
 
 
@@ -288,4 +299,14 @@ def handle_create_artifact(
         ok=True,
         content=created.to_dict(),
         artifact_ids=(created.artifact_id,),
+        receipt={
+            "result_summary": f"created artifact {created.relative_path}",
+            "affected_resources": [created.artifact_id],
+            "artifact_id": created.artifact_id,
+            "relative_path": created.relative_path,
+            "title": created.title,
+            "category": created.category,
+            "content_hash": created.content_hash,
+            "bytes_written": created.bytes_written,
+        },
     )

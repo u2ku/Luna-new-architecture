@@ -162,8 +162,30 @@ Every tool execution appends a **paired** event to `world.jsonl`:
 A tool call is intent; a result is proof. Receipts never carry complete
 artifact contents: `luna/tools/receipts.py` bounds arguments to declared
 fields, truncates long strings, caps list sizes, and redacts token-shaped
-values; the result payload records only `tool`, `call_event_id`, `status`,
-`artifact_ids`, `error_code`, `duration_ms` — never `content`.
+values. The `tool_result` payload carries an envelope on **every** call plus
+a bounded per-tool digest — never `content`:
+
+```
+tool_result:
+  tool, call_event_id, call_id, status,         # identity + pairing
+  started_at, finished_at, duration_ms,         # when it ran
+  error_code, error_message,                     # always present; None on success
+  result_summary,                               # one-line human description
+  affected_resources,                            # stable ids/paths touched
+  artifact_ids,                                  # legacy alias of affected_resources
+  receipt:                                       # per-tool digest (sanitised)
+    search_archive:  query, result_count, top_results[]
+                      (artifact_id, title, relative_path, score)
+    read_artifact:   artifact_id, relative_path, start_line, end_line,
+                      characters_returned, truncated, content_hash
+    create_artifact: artifact_id, relative_path, title, category,
+                      content_hash, bytes_written
+```
+
+`content_hash` is a sha256 of the bytes the model received (read) or that
+were written to disk (create) — enough to prove what happened and locate the
+durable result without storing it. `top_results` carries no excerpts. The
+ledger holds only what's needed for proof and lookup.
 
 ## Model integration
 

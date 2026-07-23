@@ -328,6 +328,25 @@ def handle_search_archive(
         date_until=args.get("date_until"),
     )
     artifact_ids = tuple(r["artifact_id"] for r in content.get("results", []))
+    results = content.get("results", [])
+    result_count = content.get("count", len(results))
+    available = content.get("available", True)
+    # Top results are bounded and carry no excerpt/matched_terms — only
+    # enough to prove ranking and to let read_artifact locate the file.
+    top_results = [
+        {
+            "artifact_id": r["artifact_id"],
+            "title": r["title"],
+            "relative_path": r["relative_path"],
+            "score": r["score"],
+        }
+        for r in results[:5]
+    ]
+    summary = (
+        "archive unavailable"
+        if not available
+        else f"search {query!r} → {result_count} result(s)"
+    )
     # An unavailable root is not a failure — surface it as a successful
     # but empty result so the model can react gracefully.
     return ToolResult(
@@ -336,4 +355,11 @@ def handle_search_archive(
         ok=True,
         content=content,
         artifact_ids=artifact_ids,
+        receipt={
+            "result_summary": summary,
+            "affected_resources": list(artifact_ids),
+            "query": query,
+            "result_count": result_count,
+            "top_results": top_results,
+        },
     )

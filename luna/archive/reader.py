@@ -17,6 +17,7 @@ Safety guarantees:
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -194,10 +195,31 @@ def handle_read_artifact(
         default_lines=context.read_default_lines,
         max_lines=context.read_max_lines,
     )
+    # Build the receipt digest: enough to prove what was read (a hash of
+    # the returned text) and locate it, without storing the content.
+    lines_read = content.get("content", [])
+    returned_text = "\n".join(entry.get("text", "") for entry in lines_read)
+    characters_returned = sum(len(entry.get("text", "")) for entry in lines_read)
+    content_hash = hashlib.sha256(returned_text.encode("utf-8")).hexdigest()
     return ToolResult(
         call_id=request.call_id,
         name="read_artifact",
         ok=True,
         content=content,
         artifact_ids=(content["artifact_id"],),
+        receipt={
+            "result_summary": (
+                f"read {content['artifact_id']} lines "
+                f"{content['start_line']}-{content['end_line']} "
+                f"of {content['total_lines']}"
+            ),
+            "affected_resources": [content["artifact_id"]],
+            "artifact_id": content["artifact_id"],
+            "relative_path": content["relative_path"],
+            "start_line": content["start_line"],
+            "end_line": content["end_line"],
+            "characters_returned": characters_returned,
+            "truncated": content["truncated"],
+            "content_hash": content_hash,
+        },
     )

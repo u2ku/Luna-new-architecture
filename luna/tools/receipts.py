@@ -9,9 +9,12 @@ Every tool execution appends a pair of events to ``world.jsonl``:
 The architecture rule is that a tool call is intent and a result is
 proof. To honour that, receipts never carry complete artifact contents:
 arguments are bounded to declared fields with long strings truncated
-and token-shaped values redacted, and the result payload records only
-status, artifact ids, error code, and duration — never the content the
-tool returned.
+and token-shaped values redacted. The result payload carries only the
+envelope every tool_result needs — ``started_at`` / ``finished_at``,
+``status``, ``duration_ms``, ``error_code``, ``result_summary``,
+``affected_resources`` — plus a bounded per-tool digest (``query``,
+``result_count``, ``top_results``, ``content_hash``, ``bytes_written``,
+…) nested under ``receipt``. Never the content the tool returned.
 """
 
 from __future__ import annotations
@@ -107,28 +110,69 @@ def build_tool_call_payload(
     }
 
 
+def _default_result_summary(result: ToolResult) -> str:
+    """A fallback one-line summary when a tool did not provide one."""
+    if result.error is not None:
+        return result.error.message
+    if result.artifact_ids:
+        return f"{result.name}: ok ({len(result.artifact_ids)} resource(s))"
+    return f"{result.name}: {result.ok}"
+
+
 def build_tool_result_payload(
-    result: ToolResult, call_event_id: str
+    result: ToolResult,
+    call_event_id: str,
+    *,
+    started_at: str = "",
+    finished_at: str = "",
 ) -> dict[str, Any]:
     """Payload for the ``tool_result`` event (proof).
 
-    Records the matching call id, status, artifact ids touched, error
-    code on failure, and duration. Deliberately omits ``content``.
+    The envelope carries the fields every tool_result needs regardless of
+    tool: ``started_at`` / ``finished_at`` (when the dispatch ran),
+    ``status``, ``duration_ms``, ``error_code`` (always present, ``None``
+    on success), ``result_summary`` (a one-line human description), and
+    ``affected_resources`` (the stable ids/paths the call touched — enough
+    to locate the durable result).
+
+    A tool may attach a bounded per-tool digest via :attr:`ToolResult.receipt`.
+    ``result_summary`` and ``affected_resources`` are *promoted* from that
+    digest to the envelope (and dropped from the nested block to avoid
+    duplication); the rest is kept under ``receipt`` and sanitised. The
+    full content the tool returned is never persisted — only enough to
+    prove what happened and locate the durable result.
     """
+    digest: dict[str, Any] = dict(result.receipt) if getattr(result, "receipt", None) else {}
+
+    # Promote the two common fields the tool knows best; default otherwise.
+    result_summary = digest.pop("result_summary", None)
+    if not result_summary:
+        result_summary = _default_result_summary(result)
+    result_summary = redact_secrets(str(result_summary))[:MAX_ARG_STR]
+
+    affected = digest.pop("affected_resources", None)
+    if affected is None:
+        affected = list(result.artifact_ids)
+
     payload: dict[str, Any] = {
         "tool": result.name,
         "call_event_id": call_event_id,
         "call_id": result.call_id,
         "status": "ok" if result.ok else "error",
-        "artifact_ids": list(result.artifact_ids),
+        "started_at": started_at,
+        "finished_at": finished_at,
         "duration_ms": result.duration_ms,
+        "error_code": result.error.code if result.error is not None else None,
+        "error_message": result.error.message if result.error is not None else None,
+        "result_summary": result_summary,
+        "affected_resources": list(affected),
+        "artifact_ids": list(result.artifact_ids),
     }
-    if result.error is not None:
-        payload["error_code"] = result.error.code
-        payload["error_message"] = result.error.message
-    # Web tools attach a bounded receipt summary (no full snippets or
-    # page text). Sanitise it through the same truncation/redaction the
-    # arguments go through so credentials never reach the ledger.
-    if getattr(result, "receipt", None):
-        payload["receipt"] = _sanitize_value(dict(result.receipt))
+    # Any remaining per-tool digest (query, result_count, top_results,
+    # content_hash, bytes_written, …) is sanitised and nested under
+    # ``receipt``. Only ``result_summary`` and ``affected_resources`` are
+    # promoted to the envelope (above); everything else the tool attaches
+    # stays here. Tools must not put full content in the digest.
+    if digest:
+        payload["receipt"] = _sanitize_value(digest)
     return payload

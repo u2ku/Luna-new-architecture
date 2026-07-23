@@ -9,6 +9,7 @@ tool can never run unreceipted.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from ..archive import (
@@ -38,6 +39,15 @@ MAX_RESULT_CHARS_PER_TURN = 20_000
 #: Tool names that exercise the network and are subject to the separate
 #: web per-turn ceilings (see :class:`~luna.tools.config.WebTurnLimits`).
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"search_web", "fetch_webpage"})
+
+
+def _now_iso() -> str:
+    """UTC timestamp for receipt ``started_at`` / ``finished_at`` fields."""
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def build_archive_registry() -> ToolRegistry:
@@ -97,9 +107,16 @@ def execute_with_receipts(
         turn_id=context.turn_id,
     )
 
+    started_at = _now_iso()
     result = registry.execute(request, context)
+    finished_at = _now_iso()
 
-    result_payload = build_tool_result_payload(result, call_event["event_id"])
+    result_payload = build_tool_result_payload(
+        result,
+        call_event["event_id"],
+        started_at=started_at,
+        finished_at=finished_at,
+    )
     ledger.append(
         event_type="tool_result",
         actor=actor,
