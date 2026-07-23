@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from luna.api.routes import ChatRequest, ChatService
 from luna.ledger import WorldLedger
 from luna.models.base import (
@@ -361,6 +363,84 @@ def test_fetch_per_type_limit(tmp_path, monkeypatch):
     assert resp.response == "done"
     calls = [e for e in svc.ledger.tail(50) if e["type"] == "tool_call"]
     assert len(calls) == 1  # 2nd fetch refused by per-type cap
+
+
+# ---------------------------------------------------------------------------
+# Empty-reply retry (small-model flakiness recovery)
+# ---------------------------------------------------------------------------
+
+
+class _EmptyThenSearchProvider(ModelProvider):
+    """Returns N empty replies, then a real search_web sentinel, then an answer.
+
+    Uses the prompt-JSON transport (supports_native_tools=False) like whooshd,
+    so the tool call must arrive as a ```tool_call sentinel in text content.
+    """
+
+    name = "empty-then-search"
+    supports_native_tools = False
+
+    def __init__(self, empties: int) -> None:
+        self.empties = empties
+        self.step = 0
+
+    def complete(self, request) -> ModelResponse:
+        self.step += 1
+        if self.step <= self.empties:
+            # An empty assistant turn — the shape that broke whooshd before
+            # the null-content fix, and that the loop must now recover from.
+            return ModelResponse(content="", finish_reason=FinishReason.STOP,
+                                  usage=Usage(), model="empty-then-search")
+        if self.step == self.empties + 1:
+            sentinel = (
+                '```tool_call\n'
+                '{"tool": "search_web", "arguments": {"query": "q", "limit": 1}}\n'
+                '```'
+            )
+            return ModelResponse(
+                content=sentinel,
+                finish_reason=FinishReason.STOP,
+                usage=Usage(), model="empty-then-search",
+            )
+        return ModelResponse(content="recovered answer", finish_reason=FinishReason.STOP,
+                             usage=Usage(), model="empty-then-search")
+
+
+def test_empty_reply_retries_then_recovers(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUNA_DATA_ROOT", str(tmp_path))
+    search = _FakeSearchProvider([
+        ProviderSearchResult(title="t", url="https://example.com/a", snippet="s")
+    ])
+    provider = _EmptyThenSearchProvider(empties=2)
+    svc = _make_service(
+        tmp_path, provider=provider, search=_web_search_cfg(search),
+        fetch=_web_fetch_cfg(_FakeTransport({})), turn_limits=_web_turn_limits(),
+    )
+    resp = svc.complete(ChatRequest(text="search the web"))
+    # Recovered: the empty replies did not end the turn; the search executed.
+    assert resp.response == "recovered answer"
+    assert resp.tool_calls == 1
+    calls = [e for e in svc.ledger.tail(50) if e["type"] == "tool_call"]
+    assert len(calls) == 1
+    assert calls[0]["payload"]["tool"] == "search_web"
+    assert provider.step == 4  # 2 empty + 1 search + 1 final
+
+
+def test_empty_reply_exhausts_retries(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUNA_DATA_ROOT", str(tmp_path))
+    # Returns empty forever — beyond MAX_EMPTY_RETRIES the turn gives up.
+    provider = _EmptyThenSearchProvider(empties=99)
+    svc = _make_service(
+        tmp_path, provider=provider, search=_web_search_cfg(_FakeSearchProvider([])),
+        fetch=_web_fetch_cfg(_FakeTransport({})), turn_limits=_web_turn_limits(),
+    )
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        svc.complete(ChatRequest(text="search the web"))
+    assert exc.value.status_code == 502
+    # No tool was ever receipted — the turn failed before dispatching.
+    calls = [e for e in svc.ledger.tail(50) if e["type"] == "tool_call"]
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------

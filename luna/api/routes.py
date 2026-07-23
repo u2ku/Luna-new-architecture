@@ -46,6 +46,12 @@ CONTEXT_TURNS = 24
 #: cycle through the web tools module.
 _WEB_TOOL_NAMES: frozenset[str] = frozenset({"search_web", "fetch_webpage"})
 
+#: Bounded retries when the model returns an empty reply mid-loop. Small
+#: local models sometimes emit an empty assistant turn when they attempt a
+#: tool call; a nudge coaxes a real ```tool_call block or a prose answer
+#: instead of failing the turn with an empty-reply 502.
+MAX_EMPTY_RETRIES = 2
+
 #: A short, prompt-level directive added when web tools are exposed. It
 #: is a guardrail, not a structural enforcement: it instructs the model
 #: to cite sources and not claim a web search unless a tool_result was
@@ -247,6 +253,7 @@ class ChatService:
         search_used = 0
         fetch_used = 0
         web_text_used = 0
+        empty_retries = 0
         tool_actor = {
             "id": self.agent_id,
             "type": "agent",
@@ -265,8 +272,9 @@ class ChatService:
 
         wire_tools = tuple(tool_specs) if transport.wants_tools_on_wire else ()
 
-        # Defensive ceiling on iterations; the real cap is max_calls.
-        for _ in range(max_calls + 2):
+        # Defensive ceiling on iterations; the real cap is max_calls. A
+        # couple of extra slots accommodate the empty-reply retries below.
+        for _ in range(max_calls + 2 + MAX_EMPTY_RETRIES):
             response = self.provider.complete(model_request)
             extraction = transport.extract(response, call_index=calls_used + 1)
 
@@ -287,7 +295,19 @@ class ChatService:
                 continue
 
             if not extraction.calls:
-                # No tool call → this is the final answer.
+                # No tool call. A non-empty reply is the final answer.
+                if (response.content or "").strip():
+                    return response, tool_call_count
+                # Empty reply: some local models emit an empty assistant
+                # turn when they attempt a tool call. Nudge a bounded
+                # number of times to coax a real ```tool_call block or a
+                # prose answer instead of failing the turn.
+                if empty_retries < MAX_EMPTY_RETRIES:
+                    messages.append(transport.empty_reply_nudge())
+                    empty_retries += 1
+                    model_request = build_request(wire_tools)
+                    continue
+                # Out of retries — let complete() surface the empty-reply 502.
                 return response, tool_call_count
 
             # Record the assistant's tool-call turn in history.

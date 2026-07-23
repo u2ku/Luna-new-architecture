@@ -158,6 +158,13 @@ def tool_protocol_prompt(specs: list[ModelToolSpec]) -> str:
         "- After you receive a ```tool_result, either call another tool or answer.",
         "- If you do not need a tool, answer the user directly in prose.",
         "- Do not wrap tool calls in any other code block; only ```tool_call executes.",
+        "- NEVER return an empty reply. You must always either emit a ```tool_call "
+        "block or write a prose answer.",
+        "",
+        "Example — calling search_web:",
+        "```tool_call",
+        '{"tool": "search_web", "arguments": {"query": "example query", "limit": 5}}',
+        "```",
         "",
         "Available tools:",
     ]
@@ -218,6 +225,21 @@ class ToolTransport(ABC):
     @abstractmethod
     def force_final_message(self) -> Message | None:
         """Optional message to append when the call budget is spent."""
+
+    def empty_reply_nudge(self) -> Message:
+        """Message sent when the model returned an empty reply.
+
+        Coaxes a re-emit instead of failing the turn. Subclasses override
+        to tailor the instruction (e.g. the prompt-JSON transport reminds
+        the model of the ```` ```tool_call ```` sentinel).
+        """
+        return Message(
+            role="user",
+            content=(
+                "Your previous reply was empty. Answer the user directly, or "
+                "call a tool."
+            ),
+        )
 
 
 class NativeTransport(ToolTransport):
@@ -313,6 +335,16 @@ class PromptJsonTransport(ToolTransport):
             content=(
                 "You have used your tool budget for this turn. Answer the user "
                 "now; do not emit any further ```tool_call blocks."
+            ),
+        )
+
+    def empty_reply_nudge(self) -> Message:
+        return Message(
+            role="user",
+            content=(
+                "Your previous reply was empty. Either emit a single "
+                "```tool_call block to call a tool, or answer the user directly "
+                "in prose. Do not return an empty reply."
             ),
         )
 
